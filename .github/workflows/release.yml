@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  # ArchiSteamFarm release the plugin compiles against.
+  # Bump this when ASF ships a new build; the workflow downloads
+  # ArchiSteamFarm.dll + SteamKit2.dll from this exact release.
+  ASF_VERSION: '6.3.5.1'
+
+  # .NET SDK version (must match or be ahead of ASF's TFM —
+  # net10.0 for ASF 6.3.x).
+  DOTNET_VERSION: '10.0.x'
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET ${{ env.DOTNET_VERSION }}
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Download ArchiSteamFarm ${{ env.ASF_VERSION }} runtime
+        run: |
+          mkdir -p ASF
+          curl --fail --location --silent --show-error \
+            "https://github.com/JustArchiNET/ArchiSteamFarm/releases/download/${ASF_VERSION}/ASF-generic.zip" \
+            -o ASF-generic.zip
+          unzip -q ASF-generic.zip -d ASF
+          # Sanity-check the two DLLs we reference exist
+          test -f ASF/ArchiSteamFarm.dll
+          test -f ASF/SteamKit2.dll
+
+      - name: Resolve plugin version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # MSBuild prefers a 4-part version; pad if user tagged like v1.0.0
+          DOTS=$(printf '%s\n' "$VERSION" | tr -cd '.' | wc -c)
+          while [ "$DOTS" -lt 3 ]; do
+            VERSION="${VERSION}.0"
+            DOTS=$((DOTS + 1))
+          done
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version: $VERSION"
+
+      - name: Build plugin
+        env:
+          ASF_DIR: ${{ github.workspace }}/ASF
+        run: |
+          dotnet publish src/ASF-AutoIdle.csproj \
+            -c Release \
+            -o ./publish \
+            -p:Version=${{ steps.version.outputs.version }}
+
+      - name: Compute MD5 of built DLL
+        id: hash
+        run: |
+          MD5=$(md5sum publish/ASF-AutoIdle.dll | cut -d' ' -f1)
+          echo "md5=$MD5" >> "$GITHUB_OUTPUT"
+          echo "ASF-AutoIdle.dll md5: $MD5"
+
+      - name: Stage DLL into ASF-AutoIdle/ subfolder for drop-in install
+        run: |
+          mkdir -p ASF-AutoIdle
+          cp publish/ASF-AutoIdle.dll ASF-AutoIdle/
+          # Also produce a zip so users can download a single archive
+          # if they prefer that over the loose .dll
+          zip -j ASF-AutoIdle-${{ github.ref_name }}.zip ASF-AutoIdle/ASF-AutoIdle.dll
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            publish/ASF-AutoIdle.dll
+            ASF-AutoIdle-${{ github.ref_name }}.zip
+          body: |
+            ## Install
+
+            1. Download `ASF-AutoIdle.dll` from the assets below.
+            2. Drop it into `<your ASF folder>/plugins/ASF-AutoIdle/`.
+            3. Add to any bot config under `<ASF>/config/<BotName>.json`:
+               ```json
+               "AutoIdle": { "Enabled": true }
+               ```
+            4. Restart ASF.
+
+            See the [README](https://github.com/${{ github.repository }}#readme) for configuration options and runtime commands.
+
+            ## Compatibility
+
+            Built against **ArchiSteamFarm ${{ env.ASF_VERSION }}** (`net10.0`).
+
+            ## Verification
+
+            | File | MD5 |
+            |---|---|
+            | `ASF-AutoIdle.dll` | `${{ steps.hash.outputs.md5 }}` |
