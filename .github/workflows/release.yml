@@ -71,13 +71,11 @@ jobs:
           echo "md5=$MD5" >> "$GITHUB_OUTPUT"
           echo "ASF-AutoIdle.dll md5: $MD5"
 
-      - name: Stage DLL into ASF-AutoIdle/ subfolder for drop-in install
+      - name: Build a convenience zip alongside the loose DLL
         run: |
           mkdir -p ASF-AutoIdle
           cp publish/ASF-AutoIdle.dll ASF-AutoIdle/
-          # Also produce a zip so users can download a single archive
-          # if they prefer that over the loose .dll
-          zip -j ASF-AutoIdle-${{ github.ref_name }}.zip ASF-AutoIdle/ASF-AutoIdle.dll
+          zip ASF-AutoIdle-${{ github.ref_name }}.zip ASF-AutoIdle/ASF-AutoIdle.dll
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
