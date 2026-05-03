@@ -1,0 +1,17 @@
+{
+    "_comment_top": "Drop the AutoIdle block into your existing bot config (e.g. MyBot.json). Every key is optional.",
+    "SteamLogin": "your-steam-username",
+    "SteamPassword": "your-steam-password",
+    "Enabled": true,
+
+    "AutoIdle": {
+        "Enabled": true,
+        "OnlyProfileGames": true,
+        "MaxGamesAtOnce": 32,
+        "RotationMinutes": 60,
+        "InitialDelaySeconds": 30,
+        "PauseCardFarming": true,
+        "Blacklist": [730, 570],
+        "Whitelist": []
+    }
+}

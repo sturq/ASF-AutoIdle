@@ -1,0 +1,32 @@
+# .NET build artifacts
+bin/
+obj/
+publish/
+*.user
+*.suo
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.swp
+
+# Bundled ArchiSteamFarm runtime DLLs (downloaded locally to build against —
+# not redistributable; users supply their own via ASF_DIR or the project's
+# default sibling ASF/ folder)
+ASF/
+ASF-generic.zip
+
+# Internal debug-inspection helper used during development
+inspect/
+
+# Build output / distribution staging — published to GitHub Releases instead
+dist/
+
+# Claude config / sandbox helpers
+.claude/
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
