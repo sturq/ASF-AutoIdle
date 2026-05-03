@@ -117,7 +117,7 @@ public sealed class AutoIdlePlugin : IPlugin, IBotModules, IBotConnection, IBot,
 			"IDLEROTATION" or "IROTATION" or "IROT" or "IDLEINTERVAL" or "IINT" => runtime.HandleRotation(tail),
 			"IDLESTATS" or "ISTATS" or "ISTAT" => runtime.HandleStats(tail),
 			"IDLETOGGLE" or "ITOGGLE" => runtime.HandleToggle(),
-			"IDLEPAUSE" => runtime.HandleExternalPause(),
+			"IDLEPAUSE" => runtime.HandleExternalPause(tail),
 			"IDLERESUME" => runtime.HandleExternalResume(),
 			"IDLEHELP" or "IHELP" => HelpText(),
 			_ => null
@@ -182,6 +182,13 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	// "playing" slot. Not persisted — a crash / restart clears it so we
 	// always come back online cleanly.
 	private bool _externalPaused;
+	private string? _externalPausedBy;          // attribution: name of the plugin that paused us
+	private DateTime? _externalPauseStartedAt;  // when the current pause began (UTC)
+
+	// Session-only pause accounting, keyed by source plugin name.
+	// _allTimeExternalPausedSeconds is persisted; the session map resets at startup.
+	private readonly Dictionary<string, long> _sessionExternalPausedSeconds = new();
+	private readonly Dictionary<string, long> _allTimeExternalPausedSeconds = new();
 
 	// Per-game time tracking. Both keyed by AppID; values are seconds.
 	// _allTimeSeconds is persisted in BotDatabase; _sessionSeconds is in-memory only.
@@ -627,6 +634,11 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		bool? overrideOpg;
 		DateTime? lastRotation;
 		uint lastInterval;
+		bool paused;
+		string? pausedBy;
+		DateTime? pauseStartedAt;
+		Dictionary<string, long> sessionPaused;
+		Dictionary<string, long> allTimePaused;
 
 		lock (_gate) {
 			whitelistBatch = [.. _currentWhitelistBatch];
@@ -636,6 +648,11 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			overrideOpg = _onlyProfileGamesOverride;
 			lastRotation = _lastRotationAt;
 			lastInterval = _lastRotationIntervalMinutes;
+			paused = _externalPaused;
+			pausedBy = _externalPausedBy;
+			pauseStartedAt = _externalPauseStartedAt;
+			sessionPaused = new Dictionary<string, long>(_sessionExternalPausedSeconds);
+			allTimePaused = new Dictionary<string, long>(_allTimeExternalPausedSeconds);
 		}
 		HashSet<uint> effectiveWhitelist = EffectiveWhitelist(cfg);
 		HashSet<uint> effectiveBlacklist = EffectiveBlacklist(cfg);
@@ -660,6 +677,31 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			lines.Add($"  Rotation: every {effectiveInterval} min (waiting for first batch)");
 		}
 
+		// Active external pause: the bot is currently yielding the play slot.
+		if (paused && pauseStartedAt.HasValue) {
+			TimeSpan since = DateTime.UtcNow - pauseStartedAt.Value;
+			lines.Add($"  Status: PAUSED by {pausedBy ?? "an external plugin"} for {FormatDuration(since)} (rotation will skip until resume)");
+		}
+
+		// Cumulative pause attribution. We display in-progress time too, so users
+		// see the live numbers grow rather than only updating on resume.
+		if (sessionPaused.Count > 0 || allTimePaused.Count > 0 || paused) {
+			HashSet<string> sources = new(sessionPaused.Keys);
+			foreach (string s in allTimePaused.Keys) { sources.Add(s); }
+			if (paused && pausedBy is not null) { sources.Add(pausedBy); }
+
+			foreach (string s in sources.OrderBy(static x => x, StringComparer.OrdinalIgnoreCase)) {
+				sessionPaused.TryGetValue(s, out long sess);
+				allTimePaused.TryGetValue(s, out long all);
+				if (paused && string.Equals(s, pausedBy, StringComparison.Ordinal) && pauseStartedAt.HasValue) {
+					long inProgress = (long) (DateTime.UtcNow - pauseStartedAt.Value).TotalSeconds;
+					if (inProgress > 0) { sess += inProgress; all += inProgress; }
+				}
+				if (sess == 0 && all == 0) { continue; }
+				lines.Add($"  Time paused due to {s}: session {FormatDuration(TimeSpan.FromSeconds(sess))}, all-time {FormatDuration(TimeSpan.FromSeconds(all))}");
+			}
+		}
+
 		lines.Add($"  Whitelist: {effectiveWhitelist.Count} game(s)");
 		if (effectiveWhitelist.Count > 0) {
 			lines.Add($"    {FormatList(effectiveWhitelist)}");
@@ -668,15 +710,19 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		if (effectiveBlacklist.Count > 0) {
 			lines.Add($"    {FormatList(effectiveBlacklist)}");
 		}
-		lines.Add($"  Currently idling: {whitelistBatch.Count + dynamicBatch.Count} game(s)");
-		if (whitelistBatch.Count > 0) {
-			lines.Add($"    Whitelisted ({whitelistBatch.Count}): {FormatList(whitelistBatch)}");
-		}
-		if (dynamicBatch.Count > 0) {
-			lines.Add($"    Dynamic ({dynamicBatch.Count}): {FormatList(dynamicBatch)}");
-		}
-		if (whitelistBatch.Count == 0 && dynamicBatch.Count == 0) {
-			lines.Add("    (nothing yet — rotation hasn't picked the first batch)");
+		if (paused) {
+			lines.Add($"  Currently idling: 0 game(s) — paused by {pausedBy ?? "an external plugin"}");
+		} else {
+			lines.Add($"  Currently idling: {whitelistBatch.Count + dynamicBatch.Count} game(s)");
+			if (whitelistBatch.Count > 0) {
+				lines.Add($"    Whitelisted ({whitelistBatch.Count}): {FormatList(whitelistBatch)}");
+			}
+			if (dynamicBatch.Count > 0) {
+				lines.Add($"    Dynamic ({dynamicBatch.Count}): {FormatList(dynamicBatch)}");
+			}
+			if (whitelistBatch.Count == 0 && dynamicBatch.Count == 0) {
+				lines.Add("    (nothing yet — rotation hasn't picked the first batch)");
+			}
 		}
 
 		return string.Join('\n', lines);
@@ -762,7 +808,20 @@ internal sealed class BotRuntime : IAsyncDisposable {
 
 		(Dictionary<uint, long> allTime, Dictionary<uint, long> sessionTime, DateTime sessionStart) = SnapshotStats();
 
-		if (allTime.Count == 0 && sessionTime.Count == 0) {
+		Dictionary<string, long> sessionPaused;
+		Dictionary<string, long> allTimePaused;
+		bool paused;
+		string? pausedBy;
+		DateTime? pauseStartedAt;
+		lock (_gate) {
+			sessionPaused = new Dictionary<string, long>(_sessionExternalPausedSeconds);
+			allTimePaused = new Dictionary<string, long>(_allTimeExternalPausedSeconds);
+			paused = _externalPaused;
+			pausedBy = _externalPausedBy;
+			pauseStartedAt = _externalPauseStartedAt;
+		}
+
+		if (allTime.Count == 0 && sessionTime.Count == 0 && allTimePaused.Count == 0 && !paused) {
 			return $"AutoIdle stats for {_bot.BotName}: no rotation tracked yet.";
 		}
 
@@ -789,6 +848,25 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		lines.Add($"  Plugin uptime (all sessions): {FormatDuration(TimeSpan.FromSeconds(totalUptimeSecs))}");
 		lines.Add($"  Total tracked (all-time, summed): {FormatDuration(TimeSpan.FromSeconds(totalAll))}");
 		lines.Add($"  Total tracked (this session, summed): {FormatDuration(TimeSpan.FromSeconds(totalSession))}");
+
+		// Pause-time attribution. Per-game stats above already exclude paused
+		// time; these lines surface where it went so users can reconcile
+		// uptime - tracked time = pause time.
+		HashSet<string> pauseSources = new(sessionPaused.Keys);
+		foreach (string s in allTimePaused.Keys) { pauseSources.Add(s); }
+		if (paused && pausedBy is not null) { pauseSources.Add(pausedBy); }
+
+		foreach (string s in pauseSources.OrderBy(static x => x, StringComparer.OrdinalIgnoreCase)) {
+			sessionPaused.TryGetValue(s, out long sess);
+			allTimePaused.TryGetValue(s, out long all);
+			if (paused && string.Equals(s, pausedBy, StringComparison.Ordinal) && pauseStartedAt.HasValue) {
+				long inProgress = (long) (DateTime.UtcNow - pauseStartedAt.Value).TotalSeconds;
+				if (inProgress > 0) { sess += inProgress; all += inProgress; }
+			}
+			if (sess == 0 && all == 0) { continue; }
+			lines.Add($"  Time paused due to {s}: session {FormatDuration(TimeSpan.FromSeconds(sess))}, all-time {FormatDuration(TimeSpan.FromSeconds(all))}");
+		}
+
 		lines.Add($"  Session started: {sessionStart.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)} UTC");
 		lines.Add("");
 
@@ -860,33 +938,70 @@ internal sealed class BotRuntime : IAsyncDisposable {
 
 	// External-pause / external-resume: invoked by sibling plugins (e.g.
 	// ASF-AutoAchievement) so they can take exclusive control of the bot's
-	// "playing" slot for the duration of a scan. Both are idempotent. Not
-	// persisted — the flag clears on restart so we never come back stuck off.
-	internal string HandleExternalPause() {
+	// "playing" slot for the duration of a scan. Both are idempotent. The
+	// pause flag itself is transient — it clears on restart so we never
+	// come back stuck off — but the cumulative pause duration per source is
+	// persisted in BotDatabase for stats reporting.
+	//
+	// Optional first arg is a plugin tag (e.g. "ASF-AutoAchievement") used
+	// for attribution in idleshow / idlestats output.
+	internal string HandleExternalPause(string[] args) {
+		string source = (args.Length > 0 && !string.IsNullOrWhiteSpace(args[0]))
+			? args[0].Trim()
+			: "an external plugin";
+
 		bool wasPaused;
 		lock (_gate) {
 			wasPaused = _externalPaused;
 			_externalPaused = true;
+			if (!wasPaused) {
+				_externalPausedBy = source;
+				_externalPauseStartedAt = DateTime.UtcNow;
+			}
 		}
 
 		if (!wasPaused) {
+			// Close out the in-flight batch's tracked time before we yield —
+			// otherwise the duration the bot spent paused would get credited
+			// to whatever games were playing at pause-start.
+			RecordPreviousBatchTime();
+
 			// Drop the current play state so the requesting plugin can grab it
 			// without our most recent batch fighting for the slot.
 			try { _bot.Actions.Resume(); } catch { }
-			_bot.ArchiLogger.LogGenericInfo("AutoIdle: paused by external request (rotation will skip until !idleresume).");
+			_bot.ArchiLogger.LogGenericInfo($"AutoIdle: paused by {source}. Rotation will skip until !idleresume.");
 		}
 		return "AutoIdle: paused.";
 	}
 
 	internal string HandleExternalResume() {
 		bool wasPaused;
+		string? source = null;
+		long elapsedSecs = 0;
 		lock (_gate) {
 			wasPaused = _externalPaused;
+			if (wasPaused && _externalPauseStartedAt.HasValue) {
+				elapsedSecs = (long) (DateTime.UtcNow - _externalPauseStartedAt.Value).TotalSeconds;
+				if (elapsedSecs < 0) { elapsedSecs = 0; }
+
+				source = _externalPausedBy ?? "an external plugin";
+				_sessionExternalPausedSeconds.TryGetValue(source, out long sess);
+				_sessionExternalPausedSeconds[source] = sess + elapsedSecs;
+				_allTimeExternalPausedSeconds.TryGetValue(source, out long all);
+				_allTimeExternalPausedSeconds[source] = all + elapsedSecs;
+			}
 			_externalPaused = false;
+			_externalPausedBy = null;
+			_externalPauseStartedAt = null;
+			if (wasPaused) {
+				SavePersistentState();
+			}
 		}
 
 		if (wasPaused) {
-			_bot.ArchiLogger.LogGenericInfo("AutoIdle: external pause cleared, restarting rotation.");
+			_bot.ArchiLogger.LogGenericInfo(
+				$"AutoIdle: external pause cleared after {FormatDuration(TimeSpan.FromSeconds(elapsedSecs))} (paused by {source ?? "?"}). Restarting rotation."
+			);
 			RestartImmediately();
 		}
 		return "AutoIdle: resumed.";
@@ -1005,6 +1120,17 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					&& uptSecs >= 0) {
 					_totalUptimeBaselineSeconds = uptSecs;
 				}
+				if (TryGetProp(state, "allTimeExternalPaused", out JsonElement pauseEl)
+					&& pauseEl.ValueKind == JsonValueKind.Object) {
+					foreach (JsonProperty prop in pauseEl.EnumerateObject()) {
+						if (!string.IsNullOrEmpty(prop.Name)
+							&& prop.Value.ValueKind == JsonValueKind.Number
+							&& prop.Value.TryGetInt64(out long pSecs)
+							&& pSecs >= 0) {
+							_allTimeExternalPausedSeconds[prop.Name] = pSecs;
+						}
+					}
+				}
 			}
 		} catch (Exception ex) {
 			_bot.ArchiLogger.LogGenericException(ex);
@@ -1043,8 +1169,24 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		long totalUptime = _totalUptimeBaselineSeconds + (long) (DateTime.UtcNow - _sessionStartedAt).TotalSeconds;
 		string uptimePart = ",\"totalUptimeSeconds\":" + totalUptime.ToString(CultureInfo.InvariantCulture);
 
+		StringBuilder pauseSb = new();
+		pauseSb.Append("{");
+		bool firstPause = true;
+		foreach (KeyValuePair<string, long> kvp in _allTimeExternalPausedSeconds) {
+			if (!firstPause) {
+				pauseSb.Append(",");
+			}
+			pauseSb.Append("\"");
+			pauseSb.Append(EscapeJsonString(kvp.Key));
+			pauseSb.Append("\":");
+			pauseSb.Append(kvp.Value.ToString(CultureInfo.InvariantCulture));
+			firstPause = false;
+		}
+		pauseSb.Append("}");
+		string pausePart = ",\"allTimeExternalPaused\":" + pauseSb.ToString();
+
 		string json = "{\"whitelist\":[" + whitelistCsv + "],\"blacklist\":[" + blacklistCsv + "]"
-			+ overridePart + rotationPart + statsPart + uptimePart + "}";
+			+ overridePart + rotationPart + statsPart + uptimePart + pausePart + "}";
 
 		try {
 			using JsonDocument doc = JsonDocument.Parse(json);
@@ -1053,6 +1195,30 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		} catch (Exception ex) {
 			_bot.ArchiLogger.LogGenericException(ex);
 		}
+	}
+
+	private static string EscapeJsonString(string s) {
+		StringBuilder sb = new(s.Length + 8);
+		foreach (char c in s) {
+			switch (c) {
+				case '\\': sb.Append("\\\\"); break;
+				case '"': sb.Append("\\\""); break;
+				case '\b': sb.Append("\\b"); break;
+				case '\f': sb.Append("\\f"); break;
+				case '\n': sb.Append("\\n"); break;
+				case '\r': sb.Append("\\r"); break;
+				case '\t': sb.Append("\\t"); break;
+				default:
+					if (c < 0x20) {
+						sb.Append("\\u");
+						sb.Append(((int) c).ToString("x4", CultureInfo.InvariantCulture));
+					} else {
+						sb.Append(c);
+					}
+					break;
+			}
+		}
+		return sb.ToString();
 	}
 
 	private static bool TryGetProp(in JsonElement element, string name, out JsonElement value) {
