@@ -27,7 +27,7 @@ No Steam Web API key. No game IDs to enter. Drop the DLL in `plugins/`, set `"Au
 
 You should see in the log:
 ```
-ASF-AutoIdle v1.0.0.0 loaded — every bot's library will be idled in rotating batches of 32.
+ASF-AutoIdle vX.Y.Z.0 loaded — every bot's library will be idled in rotating batches of 32.
 <Bot> > AutoIdle: rotation loop started.
 <Bot> > AutoIdle: profile owned-games returned N entries.
 <Bot> > AutoIdle: now idling 32 game(s).
