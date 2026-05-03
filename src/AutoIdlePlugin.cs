@@ -117,6 +117,8 @@ public sealed class AutoIdlePlugin : IPlugin, IBotModules, IBotConnection, IBot,
 			"IDLEROTATION" or "IROTATION" or "IROT" or "IDLEINTERVAL" or "IINT" => runtime.HandleRotation(tail),
 			"IDLESTATS" or "ISTATS" or "ISTAT" => runtime.HandleStats(tail),
 			"IDLETOGGLE" or "ITOGGLE" => runtime.HandleToggle(),
+			"IDLEPAUSE" => runtime.HandleExternalPause(),
+			"IDLERESUME" => runtime.HandleExternalResume(),
 			"IDLEHELP" or "IHELP" => HelpText(),
 			_ => null
 		};
@@ -174,6 +176,12 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	private uint? _rotationMinutesOverride;
 	private bool _skipNextInitialDelay;
 	private bool _persistentLoaded;
+
+	// Transient flag set by sibling plugins (e.g. ASF-AutoAchievement) to
+	// pause the rotation while they need exclusive control of the bot's
+	// "playing" slot. Not persisted — a crash / restart clears it so we
+	// always come back online cleanly.
+	private bool _externalPaused;
 
 	// Per-game time tracking. Both keyed by AppID; values are seconds.
 	// _allTimeSeconds is persisted in BotDatabase; _sessionSeconds is in-memory only.
@@ -335,6 +343,22 @@ internal sealed class BotRuntime : IAsyncDisposable {
 
 			while (!token.IsCancellationRequested) {
 				lock (_gate) { cfg = _config; }
+
+				bool paused;
+				lock (_gate) { paused = _externalPaused; }
+				if (paused) {
+					// Another plugin (e.g. AutoAchievement) is using the bot's
+					// "playing" slot. Don't fight for it — sleep briefly and
+					// re-check. The pausing plugin calls !idleresume when done,
+					// which triggers RestartImmediately and exits this branch
+					// near-instantly.
+					try {
+						await Task.Delay(TimeSpan.FromSeconds(30), token).ConfigureAwait(false);
+					} catch (OperationCanceledException) {
+						break;
+					}
+					continue;
+				}
 
 				if (DateTime.UtcNow >= nextRefresh) {
 					List<uint> fresh = await DiscoverPoolAsync(cfg).ConfigureAwait(false);
@@ -832,6 +856,40 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			? "IPlayerService.GetOwnedGames (~hundreds of profile games)"
 			: "store dynamicstore (~thousands, includes DLC etc.)";
 		return $"OnlyProfileGames is now {newValue} (runtime override). Next discovery uses {source}.";
+	}
+
+	// External-pause / external-resume: invoked by sibling plugins (e.g.
+	// ASF-AutoAchievement) so they can take exclusive control of the bot's
+	// "playing" slot for the duration of a scan. Both are idempotent. Not
+	// persisted — the flag clears on restart so we never come back stuck off.
+	internal string HandleExternalPause() {
+		bool wasPaused;
+		lock (_gate) {
+			wasPaused = _externalPaused;
+			_externalPaused = true;
+		}
+
+		if (!wasPaused) {
+			// Drop the current play state so the requesting plugin can grab it
+			// without our most recent batch fighting for the slot.
+			try { _bot.Actions.Resume(); } catch { }
+			_bot.ArchiLogger.LogGenericInfo("AutoIdle: paused by external request (rotation will skip until !idleresume).");
+		}
+		return "AutoIdle: paused.";
+	}
+
+	internal string HandleExternalResume() {
+		bool wasPaused;
+		lock (_gate) {
+			wasPaused = _externalPaused;
+			_externalPaused = false;
+		}
+
+		if (wasPaused) {
+			_bot.ArchiLogger.LogGenericInfo("AutoIdle: external pause cleared, restarting rotation.");
+			RestartImmediately();
+		}
+		return "AutoIdle: resumed.";
 	}
 
 	private async Task<uint?> ResolveAppIDAsync(string input) {
