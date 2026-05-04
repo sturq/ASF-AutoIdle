@@ -493,24 +493,20 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					_bot.ArchiLogger.LogGenericException(ex);
 				}
 
-				// Sleep until the next rotation, but in 30s chunks so we can
-				// react to the user opening / closing a game on this account.
-				// Single Task.Delay(30 min) wouldn't notice mid-window state
-				// changes — we'd sit idle for up to half an hour after the
-				// user closes their game. The chunked check re-asserts the
-				// current batch on a blocked→free transition.
-				//
-				// We also re-assert Play(batch) every 2 minutes regardless
-				// of state changes — a "heartbeat". Steam silently drops or
-				// overrides the play state in several scenarios (e.g. right
-				// after a disconnect/reconnect storm, or when ASF's badge
-				// farmer runs StartFarming and resets the slot). Without
-				// the heartbeat, the user has to manually launch+close a
-				// game to trigger the blocked→free re-assert. With it,
-				// AutoIdle silently recovers within ~2 min.
+				// Sleep until the next rotation in 30s chunks. Every chunk
+				// wakeup we both react to state transitions (user opened or
+				// closed a Steam game on this account) AND silently re-assert
+				// Play(batch) — a heartbeat. Steam quietly drops or overrides
+				// the play state in several scenarios (right after the
+				// disconnect/reconnect during a sibling-plugin pause/resume
+				// handoff, ASF's card-farmer check on connect, FreePackages
+				// claiming a package, etc.). Without re-asserting frequently
+				// the bot can sit "showing as idling" but actually playing
+				// nothing for minutes. Doing it every 30s keeps recovery
+				// fast and matches the frequency ASF's own card farmer uses
+				// to keep its play state alive — Steam handles it fine.
 				DateTime sleepUntil = DateTime.UtcNow.AddMinutes(minutes);
 				bool prevPossible = _bot.IsPlayingPossible;
-				DateTime nextHeartbeat = DateTime.UtcNow.AddMinutes(2);
 				bool aborted = false;
 
 				while (DateTime.UtcNow < sleepUntil && !token.IsCancellationRequested) {
@@ -541,11 +537,9 @@ internal sealed class BotRuntime : IAsyncDisposable {
 						} catch (Exception ex) {
 							_bot.ArchiLogger.LogGenericException(ex);
 						}
-						nextHeartbeat = DateTime.UtcNow.AddMinutes(2);
-					} else if (nowPossible && DateTime.UtcNow >= nextHeartbeat) {
-						// Silent heartbeat re-assert. Don't log on success —
-						// would spam every 2 min — but warn if it fails so
-						// the user can see something's wrong.
+					} else if (nowPossible) {
+						// Silent heartbeat re-assert. No log on success
+						// (would spam every 30s); warn if it fails.
 						try {
 							(bool hbok, string hbmsg) = await _bot.Actions.Play(batch).ConfigureAwait(false);
 							if (!hbok) {
@@ -554,7 +548,6 @@ internal sealed class BotRuntime : IAsyncDisposable {
 						} catch (Exception ex) {
 							_bot.ArchiLogger.LogGenericException(ex);
 						}
-						nextHeartbeat = DateTime.UtcNow.AddMinutes(2);
 					}
 					prevPossible = nowPossible;
 				}
