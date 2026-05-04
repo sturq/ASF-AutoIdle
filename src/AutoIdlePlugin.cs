@@ -243,23 +243,32 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	}
 
 	internal void Start() {
-		PluginConfig cfg;
+		// Everything that touches _loop / _cts must stay inside the lock —
+		// otherwise concurrent Start() calls (UpdateConfig restart task +
+		// OnBotLoggedOn happening near-simultaneously after a config reload)
+		// can both pass the "is loop running?" check before either assigns
+		// _loop, spawning duplicate Tasks that race and cancel each other.
+		bool startedNew = false;
+		bool isDisabled = false;
 		lock (_gate) {
 			if (_loop is { IsCompleted: false }) {
 				return;
 			}
-			cfg = _config;
-			_cts = new CancellationTokenSource();
+			if (!_config.Enabled) {
+				isDisabled = true;
+			} else {
+				_cts = new CancellationTokenSource();
+				CancellationToken token = _cts.Token;
+				_loop = Task.Run(() => RotateAsync(token));
+				startedNew = true;
+			}
 		}
 
-		if (!cfg.Enabled) {
+		if (isDisabled) {
 			_bot.ArchiLogger.LogGenericInfo("AutoIdle: disabled in config for this bot.");
-			return;
+		} else if (startedNew) {
+			_bot.ArchiLogger.LogGenericInfo("AutoIdle: rotation loop started.");
 		}
-
-		CancellationToken token = _cts!.Token;
-		_loop = Task.Run(() => RotateAsync(token));
-		_bot.ArchiLogger.LogGenericInfo("AutoIdle: rotation loop started.");
 	}
 
 	internal void Stop() {
@@ -331,15 +340,36 @@ internal sealed class BotRuntime : IAsyncDisposable {
 				}
 			}
 
-			List<uint> pool = await DiscoverPoolAsync(cfg).ConfigureAwait(false);
-			lock (_gate) { _currentPool = pool; }
+			// Pool discovery often returns empty right after a reconnect (Steam
+			// briefly refuses), so retry with backoff instead of giving up.
+			// Previously this would log "no eligible games found, idling will
+			// not start" and exit the loop permanently — a Steam blip after a
+			// config reload or LoggedInElsewhere could leave the bot idle
+			// indefinitely.
+			List<uint> pool;
+			HashSet<uint> effectiveWhitelist;
+			int eligibleCount;
+			bool warnedEmpty = false;
+			while (true) {
+				if (token.IsCancellationRequested) { return; }
 
-			HashSet<uint> effectiveWhitelist = EffectiveWhitelist(cfg);
-			int eligibleCount = pool.Count + effectiveWhitelist.Count;
+				pool = await DiscoverPoolAsync(cfg).ConfigureAwait(false);
+				lock (_gate) { _currentPool = pool; }
 
-			if (eligibleCount == 0) {
-				_bot.ArchiLogger.LogGenericWarning("AutoIdle: no eligible games found, idling will not start.");
-				return;
+				effectiveWhitelist = EffectiveWhitelist(cfg);
+				eligibleCount = pool.Count + effectiveWhitelist.Count;
+
+				if (eligibleCount > 0) { break; }
+
+				if (!warnedEmpty) {
+					_bot.ArchiLogger.LogGenericWarning("AutoIdle: no eligible games found yet (Steam may be refusing right after reconnect). Will retry every 60s.");
+					warnedEmpty = true;
+				}
+				try {
+					await Task.Delay(TimeSpan.FromSeconds(60), token).ConfigureAwait(false);
+				} catch (OperationCanceledException) {
+					return;
+				}
 			}
 
 			_bot.ArchiLogger.LogGenericInfo(
