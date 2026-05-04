@@ -416,11 +416,49 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					_bot.ArchiLogger.LogGenericException(ex);
 				}
 
-				try {
-					await Task.Delay(TimeSpan.FromMinutes(minutes), token).ConfigureAwait(false);
-				} catch (OperationCanceledException) {
-					break;
+				// Sleep until the next rotation, but in 30s chunks so we can
+				// react to the user opening / closing a game on this account.
+				// Single Task.Delay(30 min) wouldn't notice mid-window state
+				// changes — we'd sit idle for up to half an hour after the
+				// user closes their game. The chunked check re-asserts the
+				// current batch on a blocked→free transition.
+				DateTime sleepUntil = DateTime.UtcNow.AddMinutes(minutes);
+				bool prevPossible = _bot.IsPlayingPossible;
+				bool aborted = false;
+
+				while (DateTime.UtcNow < sleepUntil && !token.IsCancellationRequested) {
+					try {
+						await Task.Delay(TimeSpan.FromSeconds(30), token).ConfigureAwait(false);
+					} catch (OperationCanceledException) {
+						aborted = true;
+						break;
+					}
+
+					// If a sibling plugin (ASF-AutoAchievement) paused us,
+					// exit the wait and let the outer loop handle the pause
+					// branch.
+					bool ext;
+					lock (_gate) { ext = _externalPaused; }
+					if (ext) { break; }
+
+					bool nowPossible = _bot.IsPlayingPossible;
+					if (prevPossible && !nowPossible) {
+						_bot.ArchiLogger.LogGenericInfo("AutoIdle: stopped idle — user is playing a game on this account.");
+					} else if (!prevPossible && nowPossible) {
+						_bot.ArchiLogger.LogGenericInfo("AutoIdle: user closed their game, re-asserting current batch.");
+						try {
+							(bool reok, string remsg) = await _bot.Actions.Play(batch).ConfigureAwait(false);
+							if (!reok) {
+								_bot.ArchiLogger.LogGenericWarning($"AutoIdle: re-Play after user closed game failed — {remsg}");
+							}
+						} catch (Exception ex) {
+							_bot.ArchiLogger.LogGenericException(ex);
+						}
+					}
+					prevPossible = nowPossible;
 				}
+
+				if (aborted) { break; }
 			}
 		} catch (OperationCanceledException) {
 			// expected on stop

@@ -15,7 +15,7 @@
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>1.0.4.0</Version>
+    <Version>1.0.5.0</Version>
     <Authors>sturq</Authors>
     <Description>ArchiSteamFarm plugin that auto-detects every owned game and idles them in rotating batches of 32 so all games gain hours evenly.</Description>
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
