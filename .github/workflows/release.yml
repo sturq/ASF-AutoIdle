@@ -71,11 +71,12 @@ jobs:
           echo "md5=$MD5" >> "$GITHUB_OUTPUT"
           echo "ASF-AutoIdle.dll md5: $MD5"
 
-      - name: Build a convenience zip alongside the loose DLL
+      - name: Build the plugin zip (DLL inside ASF-AutoIdle/ folder)
         run: |
-          mkdir -p ASF-AutoIdle
-          cp publish/ASF-AutoIdle.dll ASF-AutoIdle/
-          zip ASF-AutoIdle-${{ github.ref_name }}.zip ASF-AutoIdle/ASF-AutoIdle.dll
+          mkdir -p stage/ASF-AutoIdle
+          cp publish/ASF-AutoIdle.dll stage/ASF-AutoIdle/
+          (cd stage && zip -r "../ASF-AutoIdle-${{ github.ref_name }}.zip" ASF-AutoIdle)
+          ls -la "ASF-AutoIdle-${{ github.ref_name }}.zip"
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
@@ -83,13 +84,12 @@ jobs:
           name: ${{ github.ref_name }}
           generate_release_notes: true
           files: |
-            publish/ASF-AutoIdle.dll
             ASF-AutoIdle-${{ github.ref_name }}.zip
           body: |
             ## Install
 
-            1. Download `ASF-AutoIdle.dll` from the assets below.
-            2. Drop it into `<your ASF folder>/plugins/ASF-AutoIdle/`.
+            1. Download `ASF-AutoIdle-${{ github.ref_name }}.zip` from the assets below.
+            2. Extract it directly into `<your ASF folder>/plugins/` — the zip already contains the proper `ASF-AutoIdle/` subfolder.
             3. Add to any bot config under `<ASF>/config/<BotName>.json`:
                ```json
                "AutoIdle": { "Enabled": true }

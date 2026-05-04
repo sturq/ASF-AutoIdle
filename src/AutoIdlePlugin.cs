@@ -367,6 +367,18 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					continue;
 				}
 
+				// User has manually launched a game on this account. Hold the
+				// rotation until they close it — Steam's per-account "now
+				// playing" slot is exclusive, and our Play() calls would just
+				// silently fail (or worse, kick them out of their game).
+				if (!_bot.IsPlayingPossible) {
+					await WaitWhilePlayingBlockedAsync(token).ConfigureAwait(false);
+					if (token.IsCancellationRequested) { break; }
+					// Resume from the top of the loop so we re-check both pause
+					// flags and the pool refresh timer before picking a batch.
+					continue;
+				}
+
 				if (DateTime.UtcNow >= nextRefresh) {
 					List<uint> fresh = await DiscoverPoolAsync(cfg).ConfigureAwait(false);
 					if (fresh.Count > 0) {
@@ -637,8 +649,6 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		bool paused;
 		string? pausedBy;
 		DateTime? pauseStartedAt;
-		Dictionary<string, long> sessionPaused;
-		Dictionary<string, long> allTimePaused;
 
 		lock (_gate) {
 			whitelistBatch = [.. _currentWhitelistBatch];
@@ -651,8 +661,6 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			paused = _externalPaused;
 			pausedBy = _externalPausedBy;
 			pauseStartedAt = _externalPauseStartedAt;
-			sessionPaused = new Dictionary<string, long>(_sessionExternalPausedSeconds);
-			allTimePaused = new Dictionary<string, long>(_allTimeExternalPausedSeconds);
 		}
 		HashSet<uint> effectiveWhitelist = EffectiveWhitelist(cfg);
 		HashSet<uint> effectiveBlacklist = EffectiveBlacklist(cfg);
@@ -678,28 +686,10 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		}
 
 		// Active external pause: the bot is currently yielding the play slot.
+		// (Cumulative pause attribution lives in idlestats, not here.)
 		if (paused && pauseStartedAt.HasValue) {
 			TimeSpan since = DateTime.UtcNow - pauseStartedAt.Value;
 			lines.Add($"  Status: PAUSED by {pausedBy ?? "an external plugin"} for {FormatDuration(since)} (rotation will skip until resume)");
-		}
-
-		// Cumulative pause attribution. We display in-progress time too, so users
-		// see the live numbers grow rather than only updating on resume.
-		if (sessionPaused.Count > 0 || allTimePaused.Count > 0 || paused) {
-			HashSet<string> sources = new(sessionPaused.Keys);
-			foreach (string s in allTimePaused.Keys) { sources.Add(s); }
-			if (paused && pausedBy is not null) { sources.Add(pausedBy); }
-
-			foreach (string s in sources.OrderBy(static x => x, StringComparer.OrdinalIgnoreCase)) {
-				sessionPaused.TryGetValue(s, out long sess);
-				allTimePaused.TryGetValue(s, out long all);
-				if (paused && string.Equals(s, pausedBy, StringComparison.Ordinal) && pauseStartedAt.HasValue) {
-					long inProgress = (long) (DateTime.UtcNow - pauseStartedAt.Value).TotalSeconds;
-					if (inProgress > 0) { sess += inProgress; all += inProgress; }
-				}
-				if (sess == 0 && all == 0) { continue; }
-				lines.Add($"  Time paused due to {s}: session {FormatDuration(TimeSpan.FromSeconds(sess))}, all-time {FormatDuration(TimeSpan.FromSeconds(all))}");
-			}
 		}
 
 		lines.Add($"  Whitelist: {effectiveWhitelist.Count} game(s)");
@@ -972,6 +962,34 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			_bot.ArchiLogger.LogGenericInfo($"AutoIdle: paused by {source}. Rotation will skip until !idleresume.");
 		}
 		return "AutoIdle: paused.";
+	}
+
+	// Holds the rotation while ASF reports the bot can't play games — i.e.
+	// the Steam account is currently in a game launched outside ASF (the
+	// user opened a title in their Steam client). Logs the stop and the
+	// resume so the user can see in the log what happened.
+	private async Task WaitWhilePlayingBlockedAsync(CancellationToken token) {
+		DateTime? blockedSince = null;
+		while (!token.IsCancellationRequested && !_bot.IsPlayingPossible) {
+			bool extPaused;
+			lock (_gate) { extPaused = _externalPaused; }
+			if (extPaused) { return; }
+
+			if (blockedSince is null) {
+				blockedSince = DateTime.UtcNow;
+				_bot.ArchiLogger.LogGenericInfo("AutoIdle: stopped idle — user is playing a game on this account. Rotation will resume when free.");
+			}
+			try {
+				await Task.Delay(TimeSpan.FromSeconds(15), token).ConfigureAwait(false);
+			} catch (OperationCanceledException) {
+				return;
+			}
+		}
+
+		if (blockedSince.HasValue && !token.IsCancellationRequested) {
+			TimeSpan blockedFor = DateTime.UtcNow - blockedSince.Value;
+			_bot.ArchiLogger.LogGenericInfo($"AutoIdle: user closed their game, resuming rotation (paused {FormatDuration(blockedFor)}).");
+		}
 	}
 
 	internal string HandleExternalResume() {
