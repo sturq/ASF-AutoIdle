@@ -271,14 +271,6 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		}
 	}
 
-	internal void Stop() {
-		CancellationTokenSource? cts;
-		lock (_gate) { cts = _cts; }
-		if (cts is not null) {
-			try { cts.Cancel(); } catch (ObjectDisposedException) { }
-		}
-	}
-
 	internal async Task StopAsync() {
 		Task? loop;
 		CancellationTokenSource? cts;
@@ -382,8 +374,27 @@ internal sealed class BotRuntime : IAsyncDisposable {
 				lock (_gate) { cfg = _config; }
 
 				bool paused;
-				lock (_gate) { paused = _externalPaused; }
+				DateTime? pausedSince;
+				string? pausedBy;
+				lock (_gate) {
+					paused = _externalPaused;
+					pausedSince = _externalPauseStartedAt;
+					pausedBy = _externalPausedBy;
+				}
 				if (paused) {
+					// Failsafe: if a sibling plugin paused us and never resumed
+					// (e.g. it crashed mid-scan), don't sit idle forever. After
+					// 2h with no resume signal we self-clear the pause and let
+					// the loop carry on. The pausing plugin can re-pause if it
+					// genuinely still needs the slot.
+					if (pausedSince.HasValue && DateTime.UtcNow - pausedSince.Value > TimeSpan.FromHours(2)) {
+						_bot.ArchiLogger.LogGenericWarning(
+							$"AutoIdle: external pause from {pausedBy ?? "?"} exceeded 2h with no resume signal — auto-clearing and resuming rotation."
+						);
+						HandleExternalResume();
+						continue;
+					}
+
 					// Another plugin (e.g. AutoAchievement) is using the bot's
 					// "playing" slot. Don't fight for it — sleep briefly and
 					// re-check. The pausing plugin calls !idleresume when done,
@@ -1084,13 +1095,15 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			}
 		}
 
-		if (wasPaused) {
-			_bot.ArchiLogger.LogGenericInfo(
-				$"AutoIdle: external pause cleared after {FormatDuration(TimeSpan.FromSeconds(elapsedSecs))} (paused by {source ?? "?"}). Restarting rotation."
-			);
-			RestartImmediately();
+		if (!wasPaused) {
+			return "AutoIdle: was not paused — no-op.";
 		}
-		return "AutoIdle: resumed.";
+
+		_bot.ArchiLogger.LogGenericInfo(
+			$"AutoIdle: external pause cleared after {FormatDuration(TimeSpan.FromSeconds(elapsedSecs))} (paused by {source ?? "?"}). Restarting rotation."
+		);
+		RestartImmediately();
+		return $"AutoIdle: resumed (was paused for {FormatDuration(TimeSpan.FromSeconds(elapsedSecs))} by {source ?? "?"}).";
 	}
 
 	private async Task<uint?> ResolveAppIDAsync(string input) {
@@ -1328,7 +1341,6 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		a.Enabled == b.Enabled
 		&& a.MaxGamesAtOnce == b.MaxGamesAtOnce
 		&& a.RotationMinutes == b.RotationMinutes
-		&& a.ExcludeFreeToPlay == b.ExcludeFreeToPlay
 		&& a.OnlyProfileGames == b.OnlyProfileGames
 		&& a.PauseCardFarming == b.PauseCardFarming
 		&& a.InitialDelaySeconds == b.InitialDelaySeconds

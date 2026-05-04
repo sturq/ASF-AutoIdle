@@ -19,7 +19,6 @@ public sealed class PluginConfig {
 	public bool Enabled { get; set; } = true;
 	public byte MaxGamesAtOnce { get; set; } = 32;
 	public uint RotationMinutes { get; set; } = 60;
-	public bool ExcludeFreeToPlay { get; set; } // deprecated, no-op
 	public bool OnlyProfileGames { get; set; } = true; // default: use IPlayerService.GetOwnedGames (matches profile "Games X" count). Set false to use store dynamicstore (returns every AppID including DLC)
 	public HashSet<uint> Blacklist { get; set; } = [];
 	public HashSet<uint> Whitelist { get; set; } = [];
@@ -51,9 +50,6 @@ public sealed class PluginConfig {
 					break;
 				case "RotationMinutes":
 					if (prop.Value.ValueKind == JsonValueKind.Number && prop.Value.TryGetUInt32(out uint mins) && mins > 0) { config.RotationMinutes = mins; }
-					break;
-				case "ExcludeFreeToPlay":
-					if (prop.Value.ValueKind == JsonValueKind.True) { config.ExcludeFreeToPlay = true; } else if (prop.Value.ValueKind == JsonValueKind.False) { config.ExcludeFreeToPlay = false; }
 					break;
 				case "OnlyProfileGames":
 					if (prop.Value.ValueKind == JsonValueKind.True) { config.OnlyProfileGames = true; } else if (prop.Value.ValueKind == JsonValueKind.False) { config.OnlyProfileGames = false; }
