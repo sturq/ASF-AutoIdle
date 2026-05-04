@@ -168,6 +168,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	private CancellationTokenSource? _cts;
 	private Task? _loop;
 	private List<uint> _currentPool = [];
+	private DateTime? _currentPoolDiscoveredAt;
 	private List<uint> _currentWhitelistBatch = [];
 	private List<uint> _currentDynamicBatch = [];
 	private DateTime? _lastRotationAt;
@@ -338,37 +339,69 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			// not start" and exit the loop permanently — a Steam blip after a
 			// config reload or LoggedInElsewhere could leave the bot idle
 			// indefinitely.
+			// Reuse a cached pool from a prior rotation when it's still fresh.
+			// RestartImmediately (triggered by !iadd / !iblock / !idlerotation /
+			// !idletoggle) used to force a Steam profile-games re-fetch on
+			// every command — wasting ~5–10s of API latency for changes that
+			// don't affect pool membership at all. Now we only re-discover
+			// when the cache is empty (first run / prior failure) or older
+			// than the 12h refresh window.
 			List<uint> pool;
 			HashSet<uint> effectiveWhitelist;
-			int eligibleCount;
-			bool warnedEmpty = false;
-			while (true) {
-				if (token.IsCancellationRequested) { return; }
-
-				pool = await DiscoverPoolAsync(cfg).ConfigureAwait(false);
-				lock (_gate) { _currentPool = pool; }
-
-				effectiveWhitelist = EffectiveWhitelist(cfg);
-				eligibleCount = pool.Count + effectiveWhitelist.Count;
-
-				if (eligibleCount > 0) { break; }
-
-				if (!warnedEmpty) {
-					_bot.ArchiLogger.LogGenericWarning("AutoIdle: no eligible games found yet (Steam may be refusing right after reconnect). Will retry every 60s.");
-					warnedEmpty = true;
-				}
-				try {
-					await Task.Delay(TimeSpan.FromSeconds(60), token).ConfigureAwait(false);
-				} catch (OperationCanceledException) {
-					return;
-				}
+			DateTime? cachedAt;
+			lock (_gate) {
+				pool = [.. _currentPool];
+				cachedAt = _currentPoolDiscoveredAt;
 			}
 
-			_bot.ArchiLogger.LogGenericInfo(
-				$"AutoIdle: discovered {pool.Count} pool game(s), whitelist={effectiveWhitelist.Count}; rotating up to {cfg.MaxGamesAtOnce} every {EffectiveRotationMinutes(cfg)} min."
-			);
+			bool poolFresh = pool.Count > 0
+				&& cachedAt.HasValue
+				&& (DateTime.UtcNow - cachedAt.Value) < TimeSpan.FromHours(12);
 
-			DateTime nextRefresh = DateTime.UtcNow.AddHours(12);
+			if (poolFresh) {
+				effectiveWhitelist = EffectiveWhitelist(cfg);
+				_bot.ArchiLogger.LogGenericInfo(
+					$"AutoIdle: reusing cached pool of {pool.Count} game(s) (discovered {FormatDuration(DateTime.UtcNow - cachedAt!.Value)} ago), whitelist={effectiveWhitelist.Count}; rotating up to {cfg.MaxGamesAtOnce} every {EffectiveRotationMinutes(cfg)} min."
+				);
+			} else {
+				bool warnedEmpty = false;
+				while (true) {
+					if (token.IsCancellationRequested) { return; }
+
+					pool = await DiscoverPoolAsync(cfg).ConfigureAwait(false);
+					lock (_gate) {
+						_currentPool = pool;
+						if (pool.Count > 0) { _currentPoolDiscoveredAt = DateTime.UtcNow; }
+					}
+
+					effectiveWhitelist = EffectiveWhitelist(cfg);
+					int eligibleCount = pool.Count + effectiveWhitelist.Count;
+
+					if (eligibleCount > 0) { break; }
+
+					if (!warnedEmpty) {
+						_bot.ArchiLogger.LogGenericWarning("AutoIdle: no eligible games found yet (Steam may be refusing right after reconnect). Will retry every 60s.");
+						warnedEmpty = true;
+					}
+					try {
+						await Task.Delay(TimeSpan.FromSeconds(60), token).ConfigureAwait(false);
+					} catch (OperationCanceledException) {
+						return;
+					}
+				}
+
+				_bot.ArchiLogger.LogGenericInfo(
+					$"AutoIdle: discovered {pool.Count} pool game(s), whitelist={effectiveWhitelist.Count}; rotating up to {cfg.MaxGamesAtOnce} every {EffectiveRotationMinutes(cfg)} min."
+				);
+			}
+
+			// Schedule the next periodic refresh relative to whenever the
+			// pool was actually last discovered, not relative to "now" — so
+			// reusing a 6h-old cached pool still gets refreshed in 6h, not
+			// pushed out to 12h from now.
+			DateTime poolStamp = cachedAt ?? DateTime.UtcNow;
+			lock (_gate) { if (_currentPoolDiscoveredAt.HasValue) { poolStamp = _currentPoolDiscoveredAt.Value; } }
+			DateTime nextRefresh = poolStamp.AddHours(12);
 
 			while (!token.IsCancellationRequested) {
 				lock (_gate) { cfg = _config; }
@@ -424,7 +457,10 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					List<uint> fresh = await DiscoverPoolAsync(cfg).ConfigureAwait(false);
 					if (fresh.Count > 0) {
 						pool = fresh;
-						lock (_gate) { _currentPool = pool; }
+						lock (_gate) {
+							_currentPool = pool;
+							_currentPoolDiscoveredAt = DateTime.UtcNow;
+						}
 					}
 					nextRefresh = DateTime.UtcNow.AddHours(12);
 				}
