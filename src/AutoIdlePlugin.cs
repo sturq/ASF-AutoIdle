@@ -463,8 +463,18 @@ internal sealed class BotRuntime : IAsyncDisposable {
 				// changes — we'd sit idle for up to half an hour after the
 				// user closes their game. The chunked check re-asserts the
 				// current batch on a blocked→free transition.
+				//
+				// We also re-assert Play(batch) every 2 minutes regardless
+				// of state changes — a "heartbeat". Steam silently drops or
+				// overrides the play state in several scenarios (e.g. right
+				// after a disconnect/reconnect storm, or when ASF's badge
+				// farmer runs StartFarming and resets the slot). Without
+				// the heartbeat, the user has to manually launch+close a
+				// game to trigger the blocked→free re-assert. With it,
+				// AutoIdle silently recovers within ~2 min.
 				DateTime sleepUntil = DateTime.UtcNow.AddMinutes(minutes);
 				bool prevPossible = _bot.IsPlayingPossible;
+				DateTime nextHeartbeat = DateTime.UtcNow.AddMinutes(2);
 				bool aborted = false;
 
 				while (DateTime.UtcNow < sleepUntil && !token.IsCancellationRequested) {
@@ -495,6 +505,20 @@ internal sealed class BotRuntime : IAsyncDisposable {
 						} catch (Exception ex) {
 							_bot.ArchiLogger.LogGenericException(ex);
 						}
+						nextHeartbeat = DateTime.UtcNow.AddMinutes(2);
+					} else if (nowPossible && DateTime.UtcNow >= nextHeartbeat) {
+						// Silent heartbeat re-assert. Don't log on success —
+						// would spam every 2 min — but warn if it fails so
+						// the user can see something's wrong.
+						try {
+							(bool hbok, string hbmsg) = await _bot.Actions.Play(batch).ConfigureAwait(false);
+							if (!hbok) {
+								_bot.ArchiLogger.LogGenericWarning($"AutoIdle: heartbeat re-Play failed — {hbmsg}");
+							}
+						} catch (Exception ex) {
+							_bot.ArchiLogger.LogGenericException(ex);
+						}
+						nextHeartbeat = DateTime.UtcNow.AddMinutes(2);
 					}
 					prevPossible = nowPossible;
 				}
