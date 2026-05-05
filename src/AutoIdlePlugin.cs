@@ -178,6 +178,16 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	private bool? _onlyProfileGamesOverride;
 	private bool? _allowCardFarmingOverride;
 	private uint? _rotationMinutesOverride;
+	// State carried across an external pause so the rotation timer truly
+	// pauses (rather than resetting on resume). _pausedBatch + _pausedSleepUntil
+	// are saved when the chunk-sleep loop detects _externalPaused going true;
+	// _resumeBatchOnNextRotation is set by HandleExternalResume to signal the
+	// next RotateAsync iteration that it should pick up the saved batch
+	// instead of generating a fresh one.
+	private List<uint>? _pausedBatch;
+	private DateTime? _pausedSleepUntil;
+	private DateTime? _pausedAtForResume;
+	private bool _resumeBatchOnNextRotation;
 	private bool _skipNextInitialDelay;
 	private bool _persistentLoaded;
 
@@ -473,39 +483,117 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					nextRefresh = DateTime.UtcNow.AddHours(12);
 				}
 
-				(List<uint> whitelistBatch, List<uint> dynamicBatch) = PickBatch(pool, cfg);
-				List<uint> batch = [.. whitelistBatch, .. dynamicBatch];
-				lock (_gate) {
-					_currentWhitelistBatch = whitelistBatch;
-					_currentDynamicBatch = dynamicBatch;
-				}
-
 				uint minutes = EffectiveRotationMinutes(cfg);
 
-				// In coexist mode, yield the play slot to ASF's card farmer
-				// when it's actively farming a game. The chunked sleep below
-				// rechecks every 30s and Plays once the farmer is done.
-				if (IsCardFarmingActive(cfg)) {
-					_bot.ArchiLogger.LogGenericInfo("AutoIdle: yielding play slot — ASF card farmer is active. Will resume idling once farming completes.");
-				} else {
-					try {
-						(bool ok, string msg) = await _bot.Actions.Play(batch).ConfigureAwait(false);
-						if (ok) {
-							RecordPreviousBatchTime();
-							lock (_gate) {
-								_lastRotationAt = DateTime.UtcNow;
-								_lastRotationIntervalMinutes = minutes;
-								_accountingBatch = [.. batch];
-								_accountingBatchStartedAt = DateTime.UtcNow;
-							}
-							LogBatch(whitelistBatch, dynamicBatch);
-							SavePersistentStateLocked();
-						} else {
-							_bot.ArchiLogger.LogGenericWarning($"AutoIdle: Bot.Actions.Play failed — {msg}");
-						}
-					} catch (Exception ex) {
-						_bot.ArchiLogger.LogGenericException(ex);
+				// Resume-from-pause path: HandleExternalResume set
+				// _resumeBatchOnNextRotation, so use the batch + sleepUntil
+				// captured when the pause began rather than picking a fresh
+				// batch + fresh 60-min timer. This is what makes "the timer
+				// is also paused" actually true across sibling-plugin pauses.
+				bool resumeFromPause;
+				List<uint>? savedBatch;
+				DateTime? savedSleepUntil;
+				DateTime? savedPausedAt;
+				lock (_gate) {
+					resumeFromPause = _resumeBatchOnNextRotation;
+					savedBatch = _pausedBatch;
+					savedSleepUntil = _pausedSleepUntil;
+					savedPausedAt = _pausedAtForResume;
+					_resumeBatchOnNextRotation = false;
+					if (resumeFromPause) {
+						_pausedBatch = null;
+						_pausedSleepUntil = null;
+						_pausedAtForResume = null;
 					}
+				}
+
+				List<uint> batch;
+				List<uint> whitelistBatch;
+				List<uint> dynamicBatch;
+				DateTime sleepUntil;
+
+				if (resumeFromPause && savedBatch is not null && savedSleepUntil.HasValue && savedPausedAt.HasValue) {
+					// Reuse the previously-active batch. Shift sleepUntil
+					// forward by the pause duration so the chunk sleep
+					// resumes the SAME amount of time it had left at pause.
+					batch = savedBatch;
+					TimeSpan pauseDuration = DateTime.UtcNow - savedPausedAt.Value;
+					sleepUntil = savedSleepUntil.Value.Add(pauseDuration);
+
+					// Pull the previously-stored split (whitelist vs dynamic)
+					// for accurate logging — _currentWhitelistBatch and
+					// _currentDynamicBatch were preserved through the pause.
+					lock (_gate) {
+						whitelistBatch = [.. _currentWhitelistBatch];
+						dynamicBatch = [.. _currentDynamicBatch];
+					}
+
+					if (IsCardFarmingActive(cfg)) {
+						_bot.ArchiLogger.LogGenericInfo("AutoIdle: pause cleared but ASF card farmer is now active — yielding play slot, will resume idling when farming completes.");
+					} else {
+						try {
+							(bool reok, string remsg) = await _bot.Actions.Play(batch).ConfigureAwait(false);
+							if (reok) {
+								lock (_gate) {
+									// Shift _lastRotationAt forward by pauseDuration so
+									// idleshow's "next batch in" picks up where it left
+									// off rather than restarting from a full interval.
+									if (_lastRotationAt.HasValue) {
+										_lastRotationAt = _lastRotationAt.Value.Add(pauseDuration);
+									}
+									_accountingBatch = [.. batch];
+									_accountingBatchStartedAt = DateTime.UtcNow;
+								}
+								_bot.ArchiLogger.LogGenericInfo($"AutoIdle: resumed previous batch (timer paused {FormatDuration(pauseDuration)}).");
+								SavePersistentStateLocked();
+							} else {
+								_bot.ArchiLogger.LogGenericWarning($"AutoIdle: re-Play on resume failed — {remsg}");
+							}
+						} catch (Exception ex) {
+							_bot.ArchiLogger.LogGenericException(ex);
+						}
+					}
+				} else {
+					// Normal path: pick a fresh batch.
+					(whitelistBatch, dynamicBatch) = PickBatch(pool, cfg);
+					batch = [.. whitelistBatch, .. dynamicBatch];
+					lock (_gate) {
+						_currentWhitelistBatch = whitelistBatch;
+						_currentDynamicBatch = dynamicBatch;
+						// Any non-resume-path restart invalidates a stale
+						// pause snapshot — e.g. iadd while paused, or a
+						// reconnect that wiped state. Drop it so we don't
+						// accidentally resume into a now-incorrect batch
+						// later.
+						_pausedBatch = null;
+						_pausedSleepUntil = null;
+						_pausedAtForResume = null;
+					}
+
+					if (IsCardFarmingActive(cfg)) {
+						_bot.ArchiLogger.LogGenericInfo("AutoIdle: yielding play slot — ASF card farmer is active. Will resume idling once farming completes.");
+					} else {
+						try {
+							(bool ok, string msg) = await _bot.Actions.Play(batch).ConfigureAwait(false);
+							if (ok) {
+								RecordPreviousBatchTime();
+								lock (_gate) {
+									_lastRotationAt = DateTime.UtcNow;
+									_lastRotationIntervalMinutes = minutes;
+									_accountingBatch = [.. batch];
+									_accountingBatchStartedAt = DateTime.UtcNow;
+								}
+								LogBatch(whitelistBatch, dynamicBatch);
+								SavePersistentStateLocked();
+							} else {
+								_bot.ArchiLogger.LogGenericWarning($"AutoIdle: Bot.Actions.Play failed — {msg}");
+							}
+						} catch (Exception ex) {
+							_bot.ArchiLogger.LogGenericException(ex);
+						}
+					}
+
+					sleepUntil = DateTime.UtcNow.AddMinutes(minutes);
 				}
 
 				// Sleep until the next rotation in 30s chunks. Every chunk
@@ -520,7 +608,6 @@ internal sealed class BotRuntime : IAsyncDisposable {
 				// nothing for minutes. Doing it every 30s keeps recovery
 				// fast and matches the frequency ASF's own card farmer uses
 				// to keep its play state alive — Steam handles it fine.
-				DateTime sleepUntil = DateTime.UtcNow.AddMinutes(minutes);
 				bool prevPossible = _bot.IsPlayingPossible;
 				bool aborted = false;
 
@@ -533,11 +620,21 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					}
 
 					// If a sibling plugin (ASF-AutoAchievement) paused us,
-					// exit the wait and let the outer loop handle the pause
-					// branch.
+					// snapshot the current batch + remaining sleep so the
+					// next RotateAsync iteration (after pause clears) can
+					// resume exactly where we left off — the rotation timer
+					// effectively pauses for the duration of the sibling's
+					// hold on the play slot.
 					bool ext;
 					lock (_gate) { ext = _externalPaused; }
-					if (ext) { break; }
+					if (ext) {
+						lock (_gate) {
+							_pausedBatch = batch;
+							_pausedSleepUntil = sleepUntil;
+							_pausedAtForResume = DateTime.UtcNow;
+						}
+						break;
+					}
 
 					bool nowPossible = _bot.IsPlayingPossible;
 					bool farming = IsCardFarmingActive(cfg);
@@ -1209,6 +1306,18 @@ internal sealed class BotRuntime : IAsyncDisposable {
 
 		if (!wasPaused) {
 			return "AutoIdle: was not paused — no-op.";
+		}
+
+		// Signal the next RotateAsync iteration to resume the previously-
+		// active batch with the rotation timer carrying over from before
+		// the pause, rather than picking a fresh batch + fresh 60-min timer.
+		// This is what makes the "timer also pauses" behaviour work across
+		// a sibling pause/resume cycle. Set BEFORE RestartImmediately so
+		// the new RotateAsync sees it.
+		lock (_gate) {
+			if (_pausedBatch is not null && _pausedSleepUntil.HasValue) {
+				_resumeBatchOnNextRotation = true;
+			}
 		}
 
 		_bot.ArchiLogger.LogGenericInfo(
