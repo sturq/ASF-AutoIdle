@@ -184,10 +184,12 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	// been in a played batch since the current cycle began. When this set
 	// covers every eligible game in the pool (pool - blacklist), the cycle
 	// is complete, _cyclesCompletedAllTime is incremented, the set is
-	// cleared, and the next cycle begins. Used by idleshow to display
-	// "X/N played, full cycle in ~Yh Zm".
+	// cleared, and the next cycle begins. _currentCycleStartedAt records
+	// the wall-clock start of the active sweep so log + idleshow can show
+	// "started Xh ago".
 	private readonly HashSet<uint> _gamesPlayedThisCycle = new();
 	private long _cyclesCompletedAllTime;
+	private DateTime? _currentCycleStartedAt;
 	private DateTime? _lastRotationAt;
 	private uint _lastRotationIntervalMinutes;
 	private bool? _onlyProfileGamesOverride;
@@ -603,6 +605,12 @@ internal sealed class BotRuntime : IAsyncDisposable {
 									_lastRotationIntervalMinutes = minutes;
 									_accountingBatch = [.. batch];
 									_accountingBatchStartedAt = DateTime.UtcNow;
+									if (_gamesPlayedThisCycle.Count == 0) {
+										// Empty set means we're starting a fresh sweep
+										// (either first batch ever or just after the
+										// previous sweep completed and was cleared).
+										_currentCycleStartedAt = DateTime.UtcNow;
+									}
 									foreach (uint id in batch) {
 										_gamesPlayedThisCycle.Add(id);
 									}
@@ -613,7 +621,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 										completedCount = _cyclesCompletedAllTime;
 									}
 								}
-								LogBatch(whitelistBatch, dynamicBatch);
+								LogBatch(whitelistBatch, dynamicBatch, pool, cfg);
 								if (cycleCompleted) {
 									_bot.ArchiLogger.LogGenericInfo($"AutoIdle: pool sweep #{completedCount} complete — every game in the {eligibleCount}-game pool has been played at least once. Starting next sweep.");
 								}
@@ -760,9 +768,45 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		lock (_gate) { SavePersistentState(); }
 	}
 
-	private void LogBatch(List<uint> whitelistBatch, List<uint> dynamicBatch) {
+	private void LogBatch(List<uint> whitelistBatch, List<uint> dynamicBatch, List<uint> pool, PluginConfig cfg) {
 		int total = whitelistBatch.Count + dynamicBatch.Count;
+
+		// Pool sweep status: how many of the eligible pool have been hit
+		// since the current sweep started, how many are still pending,
+		// and an ETA for finishing the sweep at the current rotation
+		// interval. Lets the user track sweep progress at every batch
+		// log without having to run !idleshow.
+		HashSet<uint> eligible = [.. pool];
+		eligible.ExceptWith(EffectiveBlacklist(cfg));
+		int eligibleCount = eligible.Count;
+		int played;
+		DateTime? sweepStarted;
+		lock (_gate) {
+			played = Math.Min(_gamesPlayedThisCycle.Count, eligibleCount);
+			sweepStarted = _currentCycleStartedAt;
+		}
+		int remaining = Math.Max(0, eligibleCount - played);
+		int futureWl = Math.Min(EffectiveWhitelist(cfg).Count, cfg.MaxGamesAtOnce);
+		int dynCap = Math.Max(0, cfg.MaxGamesAtOnce - futureWl);
+		uint rotMin = EffectiveRotationMinutes(cfg);
+		string sweepLine;
+		if (eligibleCount == 0) {
+			sweepLine = "no eligible games";
+		} else if (remaining == 0) {
+			sweepLine = $"{played}/{eligibleCount} played, sweep complete — next batch starts a fresh sweep";
+		} else if (dynCap == 0) {
+			sweepLine = $"{played}/{eligibleCount} played, {remaining} until pool repeats (no dynamic capacity left, sweep stalled)";
+		} else {
+			int batchesLeft = (int) Math.Ceiling((double) remaining / dynCap);
+			TimeSpan eta = TimeSpan.FromMinutes((long) batchesLeft * rotMin);
+			TimeSpan since = sweepStarted.HasValue ? DateTime.UtcNow - sweepStarted.Value : TimeSpan.Zero;
+			sweepLine = sweepStarted.HasValue
+				? $"{played}/{eligibleCount} played, {remaining} until pool repeats, ~{FormatDuration(eta)} to finish sweep (started {FormatDuration(since)} ago)"
+				: $"{played}/{eligibleCount} played, {remaining} until pool repeats, ~{FormatDuration(eta)} to finish sweep";
+		}
+
 		_bot.ArchiLogger.LogGenericInfo($"AutoIdle: now idling {total} game(s).");
+		_bot.ArchiLogger.LogGenericInfo($"  Pool sweep: {sweepLine}");
 		if (whitelistBatch.Count > 0) {
 			_bot.ArchiLogger.LogGenericInfo($"  Whitelisted ({whitelistBatch.Count}): {FormatList(whitelistBatch)}");
 		}
@@ -1369,7 +1413,15 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			// Drop the current play state so the requesting plugin can grab it
 			// without our most recent batch fighting for the slot.
 			try { _bot.Actions.Resume(); } catch { }
-			_bot.ArchiLogger.LogGenericInfo($"AutoIdle: paused by {source}. Rotation will skip until !idleresume.");
+
+			// Surface the actual bottleneck. If ASF is currently card farming,
+			// the requesting plugin (e.g. AutoAchievement) is itself yielding
+			// to the farmer — so the user sees both pieces of info instead of
+			// a misleading "paused by AA" when the real cause is card farming.
+			bool farming = false;
+			try { farming = _bot.CardsFarmer.NowFarming; } catch { }
+			string note = farming ? " (ASF card farmer is also active right now — actual play slot is held by the farmer; sibling plugin is waiting for it too)" : "";
+			_bot.ArchiLogger.LogGenericInfo($"AutoIdle: paused by {source}{note}. Rotation will skip until !idleresume.");
 		}
 		return "AutoIdle: paused.";
 	}
@@ -1584,6 +1636,14 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					&& cycCount.TryGetInt64(out long cc) && cc >= 0) {
 					_cyclesCompletedAllTime = cc;
 				}
+				if (TryGetProp(state, "currentCycleStartedAt", out JsonElement cycStart)
+					&& cycStart.ValueKind == JsonValueKind.String) {
+					string? raw = cycStart.GetString();
+					if (!string.IsNullOrEmpty(raw)
+						&& DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out DateTime parsed)) {
+						_currentCycleStartedAt = parsed;
+					}
+				}
 				if (TryGetProp(state, "totalUptimeSeconds", out JsonElement upt)
 					&& upt.ValueKind == JsonValueKind.Number
 					&& upt.TryGetInt64(out long uptSecs)
@@ -1663,7 +1723,10 @@ internal sealed class BotRuntime : IAsyncDisposable {
 
 		string cycleCsv = string.Join(",", _gamesPlayedThisCycle.Select(static x => x.ToString(CultureInfo.InvariantCulture)));
 		string cyclePart = ",\"gamesPlayedThisCycle\":[" + cycleCsv + "]"
-			+ ",\"cyclesCompletedAllTime\":" + _cyclesCompletedAllTime.ToString(CultureInfo.InvariantCulture);
+			+ ",\"cyclesCompletedAllTime\":" + _cyclesCompletedAllTime.ToString(CultureInfo.InvariantCulture)
+			+ (_currentCycleStartedAt.HasValue
+				? ",\"currentCycleStartedAt\":\"" + _currentCycleStartedAt.Value.ToString("o", CultureInfo.InvariantCulture) + "\""
+				: "");
 
 		string json = "{\"whitelist\":[" + whitelistCsv + "],\"blacklist\":[" + blacklistCsv + "]"
 			+ overridePart + allowFarmPart + rotationPart + statsPart + uptimePart + pausePart + queuePart + cyclePart + "}";
