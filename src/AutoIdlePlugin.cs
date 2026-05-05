@@ -173,6 +173,13 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	private DateTime? _currentPoolDiscoveredAt;
 	private List<uint> _currentWhitelistBatch = [];
 	private List<uint> _currentDynamicBatch = [];
+	// Round-robin rotation queue: head = next AppIDs to play, tail = most
+	// recently played. PickBatch dequeues N from the head and re-enqueues
+	// them at the tail. New games discovered on a pool refresh get inserted
+	// at the head (shuffled among each other) so they get a slot quickly;
+	// games removed from the pool get filtered out. Persisted so the cycle
+	// position survives restarts.
+	private List<uint> _rotationQueue = [];
 	private DateTime? _lastRotationAt;
 	private uint _lastRotationIntervalMinutes;
 	private bool? _onlyProfileGamesOverride;
@@ -413,14 +420,6 @@ internal sealed class BotRuntime : IAsyncDisposable {
 				);
 			}
 
-			// Schedule the next periodic refresh relative to whenever the
-			// pool was actually last discovered, not relative to "now" — so
-			// reusing a 6h-old cached pool still gets refreshed in 6h, not
-			// pushed out to 12h from now.
-			DateTime poolStamp = cachedAt ?? DateTime.UtcNow;
-			lock (_gate) { if (_currentPoolDiscoveredAt.HasValue) { poolStamp = _currentPoolDiscoveredAt.Value; } }
-			DateTime nextRefresh = poolStamp.AddHours(12);
-
 			while (!token.IsCancellationRequested) {
 				lock (_gate) { cfg = _config; }
 
@@ -471,7 +470,15 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					continue;
 				}
 
-				if (DateTime.UtcNow >= nextRefresh) {
+				// Refresh the pool from Steam on every rotation tick, except
+				// when the cache was just populated (e.g. by a command-
+				// triggered restart from iadd / iblock that ran a moment
+				// ago — no point in a duplicate API call). The 30s threshold
+				// keeps back-to-back commands fast while still picking up
+				// newly-acquired games within a single rotation interval.
+				DateTime? lastRefresh;
+				lock (_gate) { lastRefresh = _currentPoolDiscoveredAt; }
+				if (!lastRefresh.HasValue || DateTime.UtcNow - lastRefresh.Value > TimeSpan.FromSeconds(30)) {
 					List<uint> fresh = await DiscoverPoolAsync(cfg).ConfigureAwait(false);
 					if (fresh.Count > 0) {
 						pool = fresh;
@@ -480,7 +487,6 @@ internal sealed class BotRuntime : IAsyncDisposable {
 							_currentPoolDiscoveredAt = DateTime.UtcNow;
 						}
 					}
-					nextRefresh = DateTime.UtcNow.AddHours(12);
 				}
 
 				uint minutes = EffectiveRotationMinutes(cfg);
@@ -773,16 +779,40 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			return (whitelistBatch, []);
 		}
 
-		List<uint> dynamicList = dynamicCandidates.ToList();
-		int take = Math.Min(remaining, dynamicList.Count);
+		// Round-robin: dequeue from the head of _rotationQueue, re-enqueue
+		// at the tail. Every game in the pool gets played once before any
+		// repeats (within the limit imposed by batch size — if pool size N
+		// is less than 2*batch_size, some games inevitably get re-played
+		// the next batch because there aren't enough fresh ones to fill 32
+		// slots). New games (in candidates but not in queue) get inserted
+		// at the head so they're played in the very next batch.
+		List<uint> dynamicBatch;
+		lock (_gate) {
+			// Drop AppIDs from the queue that are no longer eligible
+			// (removed from library, just blacklisted, just whitelisted).
+			_rotationQueue.RemoveAll(id => !dynamicCandidates.Contains(id));
 
-		// Fisher–Yates partial shuffle.
-		for (int i = 0; i < take; i++) {
-			int j = _rng.Next(i, dynamicList.Count);
-			(dynamicList[i], dynamicList[j]) = (dynamicList[j], dynamicList[i]);
+			// Insert any candidates that aren't already in the queue at
+			// the head, in randomized order — gives newly-discovered
+			// games priority and avoids a deterministic AppID-order bias
+			// when many new games appear at once.
+			HashSet<uint> queued = [.. _rotationQueue];
+			List<uint> newGames = dynamicCandidates.Where(id => !queued.Contains(id)).ToList();
+			for (int i = newGames.Count - 1; i > 0; i--) {
+				int j = _rng.Next(0, i + 1);
+				(newGames[i], newGames[j]) = (newGames[j], newGames[i]);
+			}
+			if (newGames.Count > 0) {
+				_rotationQueue.InsertRange(0, newGames);
+			}
+
+			int take = Math.Min(remaining, _rotationQueue.Count);
+			dynamicBatch = _rotationQueue.Take(take).ToList();
+			_rotationQueue.RemoveRange(0, take);
+			_rotationQueue.AddRange(dynamicBatch);
 		}
 
-		return (whitelistBatch, dynamicList.Take(take).ToList());
+		return (whitelistBatch, dynamicBatch);
 	}
 
 	private bool EffectiveOnlyProfileGames(PluginConfig cfg) {
@@ -1437,6 +1467,16 @@ internal sealed class BotRuntime : IAsyncDisposable {
 						}
 					}
 				}
+				if (TryGetProp(state, "rotationQueue", out JsonElement queueEl)
+					&& queueEl.ValueKind == JsonValueKind.Array) {
+					_rotationQueue.Clear();
+					foreach (JsonElement el in queueEl.EnumerateArray()) {
+						if (el.ValueKind == JsonValueKind.Number
+							&& el.TryGetUInt32(out uint qid) && qid > 0) {
+							_rotationQueue.Add(qid);
+						}
+					}
+				}
 				if (TryGetProp(state, "totalUptimeSeconds", out JsonElement upt)
 					&& upt.ValueKind == JsonValueKind.Number
 					&& upt.TryGetInt64(out long uptSecs)
@@ -1511,8 +1551,11 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		pauseSb.Append("}");
 		string pausePart = ",\"allTimeExternalPaused\":" + pauseSb.ToString();
 
+		string queueCsv = string.Join(",", _rotationQueue.Select(static x => x.ToString(CultureInfo.InvariantCulture)));
+		string queuePart = ",\"rotationQueue\":[" + queueCsv + "]";
+
 		string json = "{\"whitelist\":[" + whitelistCsv + "],\"blacklist\":[" + blacklistCsv + "]"
-			+ overridePart + allowFarmPart + rotationPart + statsPart + uptimePart + pausePart + "}";
+			+ overridePart + allowFarmPart + rotationPart + statsPart + uptimePart + pausePart + queuePart + "}";
 
 		try {
 			using JsonDocument doc = JsonDocument.Parse(json);
