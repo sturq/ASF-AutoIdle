@@ -642,6 +642,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 				// fast and matches the frequency ASF's own card farmer uses
 				// to keep its play state alive — Steam handles it fine.
 				bool prevPossible = _bot.IsPlayingPossible;
+				bool prevFarming = IsCardFarmingActive(cfg);
 				bool aborted = false;
 
 				while (DateTime.UtcNow < sleepUntil && !token.IsCancellationRequested) {
@@ -671,6 +672,17 @@ internal sealed class BotRuntime : IAsyncDisposable {
 
 					bool nowPossible = _bot.IsPlayingPossible;
 					bool farming = IsCardFarmingActive(cfg);
+
+					// Card-farming start/stop transitions. Logged at every
+					// edge so the user can see in the log when the slot was
+					// yielded and when it was reclaimed — symmetric with
+					// the "user opened/closed a game" lines below.
+					if (!prevFarming && farming) {
+						_bot.ArchiLogger.LogGenericInfo("AutoIdle: ASF card farmer started — yielding play slot until it finishes.");
+					} else if (prevFarming && !farming && nowPossible) {
+						_bot.ArchiLogger.LogGenericInfo("AutoIdle: ASF card farmer finished, resuming idle batch.");
+					}
+
 					if (prevPossible && !nowPossible) {
 						_bot.ArchiLogger.LogGenericInfo("AutoIdle: stopped idle — user is playing a game on this account.");
 					} else if (!prevPossible && nowPossible && !farming) {
@@ -698,6 +710,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 						}
 					}
 					prevPossible = nowPossible;
+					prevFarming = farming;
 				}
 
 				if (aborted) { break; }
@@ -1048,21 +1061,27 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		lines.Add(sweepLine);
 		lines.Add($"  Pool sweeps completed (all-time): {sweepCount}");
 
-		// Active external pause: the bot is currently yielding the play slot.
-		// (Cumulative pause attribution lives in idlestats, not here.)
-		if (paused && pauseStartedAt.HasValue) {
-			TimeSpan since = DateTime.UtcNow - pauseStartedAt.Value;
-			lines.Add($"  Status: PAUSED by {pausedBy ?? "an external plugin"} for {FormatDuration(since)} (rotation will skip until resume)");
-		}
-
-		// Card-farming status — distinct from external pause, but often
-		// concurrent (AA pauses AutoIdle while AA itself is waiting on the
-		// card farmer). Show it whenever ASF reports an active farm so the
-		// user can tell which side is the actual bottleneck.
+		// Combined status line — surface the actual current cause of any
+		// pause, not just whichever signal arrived first. The hierarchy:
+		//   ASF card farmer holds the play slot
+		//      → AutoAchievement (if installed) waits for the farmer
+		//          → AutoAchievement signals AutoIdle to pause
+		//             → AutoIdle yields
+		// Showing only "PAUSED by ASF-AutoAchievement" hides the fact that
+		// the real bottleneck is card farming. We surface both when both
+		// are true, the relevant single one when only one is true, and
+		// nothing when neither is.
 		bool nowFarming = false;
 		try { nowFarming = _bot.CardsFarmer.NowFarming; } catch { }
-		if (nowFarming) {
-			lines.Add("  ASF card farmer: currently farming a game (AutoIdle yields the play slot)");
+		if (paused && pauseStartedAt.HasValue) {
+			TimeSpan since = DateTime.UtcNow - pauseStartedAt.Value;
+			if (nowFarming) {
+				lines.Add($"  Status: idle suspended — ASF card farmer holds the play slot; {pausedBy ?? "an external plugin"} also paused for {FormatDuration(since)} waiting for it. AutoIdle resumes once both clear.");
+			} else {
+				lines.Add($"  Status: PAUSED by {pausedBy ?? "an external plugin"} for {FormatDuration(since)} (rotation will skip until resume)");
+			}
+		} else if (nowFarming) {
+			lines.Add("  Status: yielding play slot to ASF card farmer (rotation will resume automatically when farming completes)");
 		}
 
 		lines.Add($"  Whitelist: {effectiveWhitelist.Count} game(s)");
