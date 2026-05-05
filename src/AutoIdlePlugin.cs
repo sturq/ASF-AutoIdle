@@ -615,7 +615,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 								}
 								LogBatch(whitelistBatch, dynamicBatch);
 								if (cycleCompleted) {
-									_bot.ArchiLogger.LogGenericInfo($"AutoIdle: cycle #{completedCount} complete — every game in the {eligibleCount}-game pool has been played at least once. Starting next cycle.");
+									_bot.ArchiLogger.LogGenericInfo($"AutoIdle: pool sweep #{completedCount} complete — every game in the {eligibleCount}-game pool has been played at least once. Starting next sweep.");
 								}
 								SavePersistentStateLocked();
 							} else {
@@ -1012,43 +1012,57 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			lines.Add($"  Rotation: every {effectiveInterval} min (waiting for first batch)");
 		}
 
-		// Cycle progress: how many of the eligible pool have been played
-		// since the current cycle began, and an ETA for completing it
-		// based on the dynamic capacity per batch and the current rotation
-		// interval. New games added mid-cycle expand the pool and naturally
-		// extend the ETA — they're picked first on the next batch.
-		HashSet<uint> cycleEligible = [.. pool];
-		cycleEligible.ExceptWith(effectiveBlacklist);
-		int cycleEligibleCount = cycleEligible.Count;
-		int cyclePlayed;
-		long cycleCount;
+		// Pool-sweep progress: how many of the eligible pool have been
+		// played since the current sweep began, and an ETA for completing
+		// it. Dynamic capacity per batch is computed from the EFFECTIVE
+		// whitelist (the whitelist that *will* be in every future batch),
+		// not _currentWhitelistBatch — that way the ETA is accurate at
+		// iter 0 (before any batch has been picked) too.
+		HashSet<uint> sweepEligible = [.. pool];
+		sweepEligible.ExceptWith(effectiveBlacklist);
+		int sweepEligibleCount = sweepEligible.Count;
+		int sweepPlayed;
+		long sweepCount;
 		lock (_gate) {
-			cyclePlayed = _gamesPlayedThisCycle.Count;
-			cycleCount = _cyclesCompletedAllTime;
+			sweepPlayed = _gamesPlayedThisCycle.Count;
+			sweepCount = _cyclesCompletedAllTime;
 		}
-		if (cyclePlayed > cycleEligibleCount) { cyclePlayed = cycleEligibleCount; }
-		int cycleRemaining = Math.Max(0, cycleEligibleCount - cyclePlayed);
-		int dynamicCapacity = Math.Max(0, cfg.MaxGamesAtOnce - whitelistBatch.Count);
-		string cycleLine;
-		if (cycleEligibleCount == 0) {
-			cycleLine = "  Cycle: (no eligible games)";
-		} else if (cycleRemaining == 0) {
-			cycleLine = $"  Cycle: complete ({cyclePlayed}/{cycleEligibleCount}) — next batch starts a fresh cycle";
+		if (sweepPlayed > sweepEligibleCount) { sweepPlayed = sweepEligibleCount; }
+		int sweepRemaining = Math.Max(0, sweepEligibleCount - sweepPlayed);
+		int futureWhitelistInBatch = Math.Min(effectiveWhitelist.Count, cfg.MaxGamesAtOnce);
+		int dynamicCapacity = Math.Max(0, cfg.MaxGamesAtOnce - futureWhitelistInBatch);
+		// Show batch composition explicitly so the ETA math is auditable.
+		lines.Add($"  Batch capacity: {cfg.MaxGamesAtOnce} max — {futureWhitelistInBatch} whitelist always + up to {dynamicCapacity} dynamic per batch");
+		string sweepLine;
+		if (sweepEligibleCount == 0) {
+			sweepLine = "  Pool sweep: (no eligible games)";
+		} else if (sweepRemaining == 0) {
+			sweepLine = $"  Pool sweep: complete ({sweepPlayed}/{sweepEligibleCount}) — next batch starts a fresh sweep";
 		} else if (dynamicCapacity == 0) {
-			cycleLine = $"  Cycle: {cyclePlayed}/{cycleEligibleCount} played ({cycleRemaining} remaining, no dynamic capacity left after whitelist — cycle will not advance)";
+			sweepLine = $"  Pool sweep: {sweepPlayed}/{sweepEligibleCount} played ({sweepRemaining} remaining, no dynamic capacity after whitelist — sweep will not advance)";
 		} else {
-			int batchesRemaining = (int) Math.Ceiling((double) cycleRemaining / dynamicCapacity);
+			int batchesRemaining = (int) Math.Ceiling((double) sweepRemaining / dynamicCapacity);
 			TimeSpan etaSpan = TimeSpan.FromMinutes((long) batchesRemaining * effectiveInterval);
-			cycleLine = $"  Cycle: {cyclePlayed}/{cycleEligibleCount} played ({cycleRemaining} remaining, full cycle in ~{FormatDuration(etaSpan)})";
+			sweepLine = $"  Pool sweep: {sweepPlayed}/{sweepEligibleCount} played ({sweepRemaining} remaining, every game played at least once in ~{FormatDuration(etaSpan)} = {batchesRemaining} more batches)";
 		}
-		lines.Add(cycleLine);
-		lines.Add($"  Cycles completed (all-time): {cycleCount}");
+		lines.Add(sweepLine);
+		lines.Add($"  Pool sweeps completed (all-time): {sweepCount}");
 
 		// Active external pause: the bot is currently yielding the play slot.
 		// (Cumulative pause attribution lives in idlestats, not here.)
 		if (paused && pauseStartedAt.HasValue) {
 			TimeSpan since = DateTime.UtcNow - pauseStartedAt.Value;
 			lines.Add($"  Status: PAUSED by {pausedBy ?? "an external plugin"} for {FormatDuration(since)} (rotation will skip until resume)");
+		}
+
+		// Card-farming status — distinct from external pause, but often
+		// concurrent (AA pauses AutoIdle while AA itself is waiting on the
+		// card farmer). Show it whenever ASF reports an active farm so the
+		// user can tell which side is the actual bottleneck.
+		bool nowFarming = false;
+		try { nowFarming = _bot.CardsFarmer.NowFarming; } catch { }
+		if (nowFarming) {
+			lines.Add("  ASF card farmer: currently farming a game (AutoIdle yields the play slot)");
 		}
 
 		lines.Add($"  Whitelist: {effectiveWhitelist.Count} game(s)");
