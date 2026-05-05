@@ -117,6 +117,7 @@ public sealed class AutoIdlePlugin : IPlugin, IBotModules, IBotConnection, IBot,
 			"IDLEROTATION" or "IROTATION" or "IROT" or "IDLEINTERVAL" or "IINT" => runtime.HandleRotation(tail),
 			"IDLESTATS" or "ISTATS" or "ISTAT" => runtime.HandleStats(tail),
 			"IDLETOGGLE" or "ITOGGLE" => runtime.HandleToggle(),
+			"IDLECARDS" or "ICARDS" => runtime.HandleAllowCardFarmingToggle(),
 			"IDLEPAUSE" => runtime.HandleExternalPause(tail),
 			"IDLERESUME" => runtime.HandleExternalResume(),
 			"IDLEHELP" or "IHELP" => HelpText(),
@@ -146,6 +147,7 @@ public sealed class AutoIdlePlugin : IPlugin, IBotModules, IBotConnection, IBot,
 		"  idlerotation [bot] <minutes>       — change rotation interval (0 to clear override; min 5)",
 		"  idlestats [bot] [N|all]            — show top N tracked games (all-time + this session)",
 		"  idletoggle [bot]                   — toggle OnlyProfileGames (profile games vs all owned)",
+		"  idlecards [bot]                    — toggle AllowCardFarming (yield play slot to ASF card farmer)",
 		"  idlehelp                           — this message",
 	});
 }
@@ -174,6 +176,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	private DateTime? _lastRotationAt;
 	private uint _lastRotationIntervalMinutes;
 	private bool? _onlyProfileGamesOverride;
+	private bool? _allowCardFarmingOverride;
 	private uint? _rotationMinutesOverride;
 	private bool _skipNextInitialDelay;
 	private bool _persistentLoaded;
@@ -228,7 +231,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			_bot.ArchiLogger.LogGenericInfo(
 				$"AutoIdle config: Enabled={config.Enabled}, OnlyProfileGames={EffectiveOnlyProfileGames(config)}, "
 				+ $"MaxGamesAtOnce={config.MaxGamesAtOnce}, RotationMinutes={config.RotationMinutes}, "
-				+ $"InitialDelaySeconds={config.InitialDelaySeconds}, PauseCardFarming={config.PauseCardFarming}, "
+				+ $"InitialDelaySeconds={config.InitialDelaySeconds}, AllowCardFarming={EffectiveAllowCardFarming(config)}, "
 				+ $"ConfigBlacklist={config.Blacklist.Count}, ConfigWhitelist={config.Whitelist.Count}, "
 				+ $"PersistentBlacklist={_persistentBlacklist.Count}, PersistentWhitelist={_persistentWhitelist.Count}"
 			);
@@ -325,7 +328,12 @@ internal sealed class BotRuntime : IAsyncDisposable {
 				await Task.Delay(TimeSpan.FromSeconds(cfg.InitialDelaySeconds), token).ConfigureAwait(false);
 			}
 
-			if (cfg.PauseCardFarming) {
+			// AllowCardFarming=false → seize the play slot from ASF's card
+			// farmer permanently for this bot. AllowCardFarming=true (default)
+			// → leave card farming alone; the rotation loop yields whenever
+			// _bot.CardsFarmer.NowFarming is true (see IsCardFarmingActive
+			// checks below).
+			if (!EffectiveAllowCardFarming(cfg)) {
 				try {
 					await _bot.Actions.Pause(true).ConfigureAwait(false);
 				} catch (Exception ex) {
@@ -474,23 +482,30 @@ internal sealed class BotRuntime : IAsyncDisposable {
 
 				uint minutes = EffectiveRotationMinutes(cfg);
 
-				try {
-					(bool ok, string msg) = await _bot.Actions.Play(batch).ConfigureAwait(false);
-					if (ok) {
-						RecordPreviousBatchTime();
-						lock (_gate) {
-							_lastRotationAt = DateTime.UtcNow;
-							_lastRotationIntervalMinutes = minutes;
-							_accountingBatch = [.. batch];
-							_accountingBatchStartedAt = DateTime.UtcNow;
+				// In coexist mode, yield the play slot to ASF's card farmer
+				// when it's actively farming a game. The chunked sleep below
+				// rechecks every 30s and Plays once the farmer is done.
+				if (IsCardFarmingActive(cfg)) {
+					_bot.ArchiLogger.LogGenericInfo("AutoIdle: yielding play slot — ASF card farmer is active. Will resume idling once farming completes.");
+				} else {
+					try {
+						(bool ok, string msg) = await _bot.Actions.Play(batch).ConfigureAwait(false);
+						if (ok) {
+							RecordPreviousBatchTime();
+							lock (_gate) {
+								_lastRotationAt = DateTime.UtcNow;
+								_lastRotationIntervalMinutes = minutes;
+								_accountingBatch = [.. batch];
+								_accountingBatchStartedAt = DateTime.UtcNow;
+							}
+							LogBatch(whitelistBatch, dynamicBatch);
+							SavePersistentStateLocked();
+						} else {
+							_bot.ArchiLogger.LogGenericWarning($"AutoIdle: Bot.Actions.Play failed — {msg}");
 						}
-						LogBatch(whitelistBatch, dynamicBatch);
-						SavePersistentStateLocked();
-					} else {
-						_bot.ArchiLogger.LogGenericWarning($"AutoIdle: Bot.Actions.Play failed — {msg}");
+					} catch (Exception ex) {
+						_bot.ArchiLogger.LogGenericException(ex);
 					}
-				} catch (Exception ex) {
-					_bot.ArchiLogger.LogGenericException(ex);
 				}
 
 				// Sleep until the next rotation in 30s chunks. Every chunk
@@ -525,9 +540,10 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					if (ext) { break; }
 
 					bool nowPossible = _bot.IsPlayingPossible;
+					bool farming = IsCardFarmingActive(cfg);
 					if (prevPossible && !nowPossible) {
 						_bot.ArchiLogger.LogGenericInfo("AutoIdle: stopped idle — user is playing a game on this account.");
-					} else if (!prevPossible && nowPossible) {
+					} else if (!prevPossible && nowPossible && !farming) {
 						_bot.ArchiLogger.LogGenericInfo("AutoIdle: user closed their game, re-asserting current batch.");
 						try {
 							(bool reok, string remsg) = await _bot.Actions.Play(batch).ConfigureAwait(false);
@@ -537,9 +553,11 @@ internal sealed class BotRuntime : IAsyncDisposable {
 						} catch (Exception ex) {
 							_bot.ArchiLogger.LogGenericException(ex);
 						}
-					} else if (nowPossible) {
+					} else if (nowPossible && !farming) {
 						// Silent heartbeat re-assert. No log on success
-						// (would spam every 30s); warn if it fails.
+						// (would spam every 30s); warn if it fails. Skipped
+						// while card farming is active so we don't fight
+						// ASF's farmer for the play slot.
 						try {
 							(bool hbok, string hbmsg) = await _bot.Actions.Play(batch).ConfigureAwait(false);
 							if (!hbok) {
@@ -676,6 +694,26 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		}
 	}
 
+	private bool EffectiveAllowCardFarming(PluginConfig cfg) {
+		lock (_gate) {
+			return _allowCardFarmingOverride ?? cfg.AllowCardFarming;
+		}
+	}
+
+	// Returns true iff (a) we're in coexist mode (AllowCardFarming=true),
+	// AND (b) ASF's card farmer is actively farming a game right now.
+	// In that state the rotation loop should NOT call Play(batch) — doing
+	// so would knock the card-farming game out of the play slot and the
+	// farmer would just re-Play immediately, producing a 30s ping-pong.
+	private bool IsCardFarmingActive(PluginConfig cfg) {
+		if (!EffectiveAllowCardFarming(cfg)) { return false; }
+		try {
+			return _bot.CardsFarmer.NowFarming;
+		} catch {
+			return false;
+		}
+	}
+
 	private uint EffectiveRotationMinutes(PluginConfig cfg) {
 		uint? overrideValue;
 		lock (_gate) { overrideValue = _rotationMinutesOverride; }
@@ -776,6 +814,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		List<uint> pool;
 		PluginConfig cfg;
 		bool? overrideOpg;
+		bool? overrideAcf;
 		DateTime? lastRotation;
 		uint lastInterval;
 		bool paused;
@@ -788,6 +827,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			pool = [.. _currentPool];
 			cfg = _config;
 			overrideOpg = _onlyProfileGamesOverride;
+			overrideAcf = _allowCardFarmingOverride;
 			lastRotation = _lastRotationAt;
 			lastInterval = _lastRotationIntervalMinutes;
 			paused = _externalPaused;
@@ -804,6 +844,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		lines.Add($"AutoIdle status for {_bot.BotName}:");
 		lines.Add($"  Enabled: {cfg.Enabled}");
 		lines.Add($"  OnlyProfileGames: {EffectiveOnlyProfileGames(cfg)}{(overrideOpg.HasValue ? " (runtime override)" : "")}");
+		lines.Add($"  AllowCardFarming: {EffectiveAllowCardFarming(cfg)}{(overrideAcf.HasValue ? " (runtime override)" : "")}");
 		lines.Add($"  Pool size: {pool.Count}");
 
 		uint effectiveInterval = EffectiveRotationMinutes(cfg);
@@ -1058,6 +1099,24 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		return $"OnlyProfileGames is now {newValue} (runtime override). Next discovery uses {source}.";
 	}
 
+	internal string HandleAllowCardFarmingToggle() {
+		PluginConfig cfg;
+		lock (_gate) { cfg = _config; }
+
+		bool current = EffectiveAllowCardFarming(cfg);
+		bool newValue = !current;
+
+		lock (_gate) {
+			_allowCardFarmingOverride = newValue;
+			SavePersistentState();
+		}
+
+		RestartImmediately();
+		return newValue
+			? "AllowCardFarming is now true (runtime override). AutoIdle will yield the play slot whenever ASF's card farmer is active."
+			: "AllowCardFarming is now false (runtime override). AutoIdle will permanently pause card farming for this bot and own the play slot.";
+	}
+
 	// External-pause / external-resume: invoked by sibling plugins (e.g.
 	// ASF-AutoAchievement) so they can take exclusive control of the bot's
 	// "playing" slot for the duration of a scan. Both are idempotent. The
@@ -1248,6 +1307,9 @@ internal sealed class BotRuntime : IAsyncDisposable {
 				if (TryGetProp(state, "onlyProfileGamesOverride", out JsonElement opg)) {
 					if (opg.ValueKind == JsonValueKind.True) { _onlyProfileGamesOverride = true; } else if (opg.ValueKind == JsonValueKind.False) { _onlyProfileGamesOverride = false; }
 				}
+				if (TryGetProp(state, "allowCardFarmingOverride", out JsonElement acf)) {
+					if (acf.ValueKind == JsonValueKind.True) { _allowCardFarmingOverride = true; } else if (acf.ValueKind == JsonValueKind.False) { _allowCardFarmingOverride = false; }
+				}
 				if (TryGetProp(state, "rotationMinutesOverride", out JsonElement rot)
 					&& rot.ValueKind == JsonValueKind.Number
 					&& rot.TryGetUInt32(out uint rotMin)
@@ -1298,6 +1360,9 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		string overridePart = _onlyProfileGamesOverride.HasValue
 			? (",\"onlyProfileGamesOverride\":" + (_onlyProfileGamesOverride.Value ? "true" : "false"))
 			: "";
+		string allowFarmPart = _allowCardFarmingOverride.HasValue
+			? (",\"allowCardFarmingOverride\":" + (_allowCardFarmingOverride.Value ? "true" : "false"))
+			: "";
 		string rotationPart = _rotationMinutesOverride.HasValue
 			? (",\"rotationMinutesOverride\":" + _rotationMinutesOverride.Value.ToString(CultureInfo.InvariantCulture))
 			: "";
@@ -1338,7 +1403,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		string pausePart = ",\"allTimeExternalPaused\":" + pauseSb.ToString();
 
 		string json = "{\"whitelist\":[" + whitelistCsv + "],\"blacklist\":[" + blacklistCsv + "]"
-			+ overridePart + rotationPart + statsPart + uptimePart + pausePart + "}";
+			+ overridePart + allowFarmPart + rotationPart + statsPart + uptimePart + pausePart + "}";
 
 		try {
 			using JsonDocument doc = JsonDocument.Parse(json);
@@ -1395,7 +1460,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		&& a.MaxGamesAtOnce == b.MaxGamesAtOnce
 		&& a.RotationMinutes == b.RotationMinutes
 		&& a.OnlyProfileGames == b.OnlyProfileGames
-		&& a.PauseCardFarming == b.PauseCardFarming
+		&& a.AllowCardFarming == b.AllowCardFarming
 		&& a.InitialDelaySeconds == b.InitialDelaySeconds
 		&& a.Blacklist.SetEquals(b.Blacklist)
 		&& a.Whitelist.SetEquals(b.Whitelist);

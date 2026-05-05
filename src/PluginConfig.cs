@@ -22,7 +22,12 @@ public sealed class PluginConfig {
 	public bool OnlyProfileGames { get; set; } = true; // default: use IPlayerService.GetOwnedGames (matches profile "Games X" count). Set false to use store dynamicstore (returns every AppID including DLC)
 	public HashSet<uint> Blacklist { get; set; } = [];
 	public HashSet<uint> Whitelist { get; set; } = [];
-	public bool PauseCardFarming { get; set; } = true;
+	// When true (default), let ASF's built-in card farmer keep the play slot
+	// while it has cards to drop. AutoIdle won't Pause(true) at start and
+	// won't Play its batch while CardsFarmer.NowFarming is true. Set false
+	// to make AutoIdle take the slot unconditionally (the previous
+	// PauseCardFarming=true behaviour — permanently pauses card farming).
+	public bool AllowCardFarming { get; set; } = true;
 	public uint InitialDelaySeconds { get; set; } = 30;
 
 	internal static PluginConfig FromAdditionalProperties(IReadOnlyDictionary<string, JsonElement>? additional) {
@@ -60,8 +65,13 @@ public sealed class PluginConfig {
 				case "Whitelist":
 					config.Whitelist = ParseUintArray(prop.Value);
 					break;
+				case "AllowCardFarming":
+					if (prop.Value.ValueKind == JsonValueKind.True) { config.AllowCardFarming = true; } else if (prop.Value.ValueKind == JsonValueKind.False) { config.AllowCardFarming = false; }
+					break;
+				// Backward compatibility: old configs used the inverted form.
+				// PauseCardFarming=true mapped to AllowCardFarming=false.
 				case "PauseCardFarming":
-					if (prop.Value.ValueKind == JsonValueKind.True) { config.PauseCardFarming = true; } else if (prop.Value.ValueKind == JsonValueKind.False) { config.PauseCardFarming = false; }
+					if (prop.Value.ValueKind == JsonValueKind.True) { config.AllowCardFarming = false; } else if (prop.Value.ValueKind == JsonValueKind.False) { config.AllowCardFarming = true; }
 					break;
 				case "InitialDelaySeconds":
 					if (prop.Value.ValueKind == JsonValueKind.Number && prop.Value.TryGetUInt32(out uint delay)) { config.InitialDelaySeconds = delay; }
