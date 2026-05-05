@@ -180,6 +180,14 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	// games removed from the pool get filtered out. Persisted so the cycle
 	// position survives restarts.
 	private List<uint> _rotationQueue = [];
+	// Cycle tracking. _gamesPlayedThisCycle records every AppID that has
+	// been in a played batch since the current cycle began. When this set
+	// covers every eligible game in the pool (pool - blacklist), the cycle
+	// is complete, _cyclesCompletedAllTime is incremented, the set is
+	// cleared, and the next cycle begins. Used by idleshow to display
+	// "X/N played, full cycle in ~Yh Zm".
+	private readonly HashSet<uint> _gamesPlayedThisCycle = new();
+	private long _cyclesCompletedAllTime;
 	private DateTime? _lastRotationAt;
 	private uint _lastRotationIntervalMinutes;
 	private bool? _onlyProfileGamesOverride;
@@ -583,13 +591,32 @@ internal sealed class BotRuntime : IAsyncDisposable {
 							(bool ok, string msg) = await _bot.Actions.Play(batch).ConfigureAwait(false);
 							if (ok) {
 								RecordPreviousBatchTime();
+								// Cycle tracking: which games are now "played
+								// this cycle", and did we just finish a cycle?
+								HashSet<uint> eligible = [.. pool];
+								eligible.ExceptWith(EffectiveBlacklist(cfg));
+								int eligibleCount = eligible.Count;
+								bool cycleCompleted = false;
+								long completedCount = 0;
 								lock (_gate) {
 									_lastRotationAt = DateTime.UtcNow;
 									_lastRotationIntervalMinutes = minutes;
 									_accountingBatch = [.. batch];
 									_accountingBatchStartedAt = DateTime.UtcNow;
+									foreach (uint id in batch) {
+										_gamesPlayedThisCycle.Add(id);
+									}
+									if (eligibleCount > 0 && _gamesPlayedThisCycle.Count >= eligibleCount) {
+										_cyclesCompletedAllTime++;
+										_gamesPlayedThisCycle.Clear();
+										cycleCompleted = true;
+										completedCount = _cyclesCompletedAllTime;
+									}
 								}
 								LogBatch(whitelistBatch, dynamicBatch);
+								if (cycleCompleted) {
+									_bot.ArchiLogger.LogGenericInfo($"AutoIdle: cycle #{completedCount} complete — every game in the {eligibleCount}-game pool has been played at least once. Starting next cycle.");
+								}
 								SavePersistentStateLocked();
 							} else {
 								_bot.ArchiLogger.LogGenericWarning($"AutoIdle: Bot.Actions.Play failed — {msg}");
@@ -984,6 +1011,38 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		} else {
 			lines.Add($"  Rotation: every {effectiveInterval} min (waiting for first batch)");
 		}
+
+		// Cycle progress: how many of the eligible pool have been played
+		// since the current cycle began, and an ETA for completing it
+		// based on the dynamic capacity per batch and the current rotation
+		// interval. New games added mid-cycle expand the pool and naturally
+		// extend the ETA — they're picked first on the next batch.
+		HashSet<uint> cycleEligible = [.. pool];
+		cycleEligible.ExceptWith(effectiveBlacklist);
+		int cycleEligibleCount = cycleEligible.Count;
+		int cyclePlayed;
+		long cycleCount;
+		lock (_gate) {
+			cyclePlayed = _gamesPlayedThisCycle.Count;
+			cycleCount = _cyclesCompletedAllTime;
+		}
+		if (cyclePlayed > cycleEligibleCount) { cyclePlayed = cycleEligibleCount; }
+		int cycleRemaining = Math.Max(0, cycleEligibleCount - cyclePlayed);
+		int dynamicCapacity = Math.Max(0, cfg.MaxGamesAtOnce - whitelistBatch.Count);
+		string cycleLine;
+		if (cycleEligibleCount == 0) {
+			cycleLine = "  Cycle: (no eligible games)";
+		} else if (cycleRemaining == 0) {
+			cycleLine = $"  Cycle: complete ({cyclePlayed}/{cycleEligibleCount}) — next batch starts a fresh cycle";
+		} else if (dynamicCapacity == 0) {
+			cycleLine = $"  Cycle: {cyclePlayed}/{cycleEligibleCount} played ({cycleRemaining} remaining, no dynamic capacity left after whitelist — cycle will not advance)";
+		} else {
+			int batchesRemaining = (int) Math.Ceiling((double) cycleRemaining / dynamicCapacity);
+			TimeSpan etaSpan = TimeSpan.FromMinutes((long) batchesRemaining * effectiveInterval);
+			cycleLine = $"  Cycle: {cyclePlayed}/{cycleEligibleCount} played ({cycleRemaining} remaining, full cycle in ~{FormatDuration(etaSpan)})";
+		}
+		lines.Add(cycleLine);
+		lines.Add($"  Cycles completed (all-time): {cycleCount}");
 
 		// Active external pause: the bot is currently yielding the play slot.
 		// (Cumulative pause attribution lives in idlestats, not here.)
@@ -1477,6 +1536,21 @@ internal sealed class BotRuntime : IAsyncDisposable {
 						}
 					}
 				}
+				if (TryGetProp(state, "gamesPlayedThisCycle", out JsonElement cycEl)
+					&& cycEl.ValueKind == JsonValueKind.Array) {
+					_gamesPlayedThisCycle.Clear();
+					foreach (JsonElement el in cycEl.EnumerateArray()) {
+						if (el.ValueKind == JsonValueKind.Number
+							&& el.TryGetUInt32(out uint cid) && cid > 0) {
+							_gamesPlayedThisCycle.Add(cid);
+						}
+					}
+				}
+				if (TryGetProp(state, "cyclesCompletedAllTime", out JsonElement cycCount)
+					&& cycCount.ValueKind == JsonValueKind.Number
+					&& cycCount.TryGetInt64(out long cc) && cc >= 0) {
+					_cyclesCompletedAllTime = cc;
+				}
 				if (TryGetProp(state, "totalUptimeSeconds", out JsonElement upt)
 					&& upt.ValueKind == JsonValueKind.Number
 					&& upt.TryGetInt64(out long uptSecs)
@@ -1554,8 +1628,12 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		string queueCsv = string.Join(",", _rotationQueue.Select(static x => x.ToString(CultureInfo.InvariantCulture)));
 		string queuePart = ",\"rotationQueue\":[" + queueCsv + "]";
 
+		string cycleCsv = string.Join(",", _gamesPlayedThisCycle.Select(static x => x.ToString(CultureInfo.InvariantCulture)));
+		string cyclePart = ",\"gamesPlayedThisCycle\":[" + cycleCsv + "]"
+			+ ",\"cyclesCompletedAllTime\":" + _cyclesCompletedAllTime.ToString(CultureInfo.InvariantCulture);
+
 		string json = "{\"whitelist\":[" + whitelistCsv + "],\"blacklist\":[" + blacklistCsv + "]"
-			+ overridePart + allowFarmPart + rotationPart + statsPart + uptimePart + pausePart + queuePart + "}";
+			+ overridePart + allowFarmPart + rotationPart + statsPart + uptimePart + pausePart + queuePart + cyclePart + "}";
 
 		try {
 			using JsonDocument doc = JsonDocument.Parse(json);
