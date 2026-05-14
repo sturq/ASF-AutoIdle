@@ -1080,9 +1080,11 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		int sweepEligibleCount = sweepEligible.Count;
 		int sweepPlayed;
 		long sweepCount;
+		DateTime? sweepStartedAt;
 		lock (_gate) {
 			sweepPlayed = _gamesPlayedThisCycle.Count;
 			sweepCount = _cyclesCompletedAllTime;
+			sweepStartedAt = _currentCycleStartedAt;
 		}
 		if (sweepPlayed > sweepEligibleCount) { sweepPlayed = sweepEligibleCount; }
 		int sweepRemaining = Math.Max(0, sweepEligibleCount - sweepPlayed);
@@ -1103,6 +1105,17 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			sweepLine = $"  Pool sweep: {sweepPlayed}/{sweepEligibleCount} played ({sweepRemaining} remaining, every game played at least once in ~{FormatDuration(etaSpan)} = {batchesRemaining} more batches)";
 		}
 		lines.Add(sweepLine);
+		// Total sweep duration at the current pace — how long one full
+		// sweep takes end-to-end, plus how much of THIS sweep has already
+		// elapsed. Lets the user see "I'm 4h into a 25h sweep" at a glance.
+		if (sweepEligibleCount > 0 && dynamicCapacity > 0) {
+			int totalBatchesPerSweep = (int) Math.Ceiling((double) sweepEligibleCount / dynamicCapacity);
+			TimeSpan totalSweepDuration = TimeSpan.FromMinutes((long) totalBatchesPerSweep * effectiveInterval);
+			string elapsedNote = sweepStartedAt.HasValue
+				? $", current sweep started {FormatDuration(DateTime.UtcNow - sweepStartedAt.Value)} ago"
+				: "";
+			lines.Add($"  Pool sweep duration: ~{FormatDuration(totalSweepDuration)} per full sweep ({totalBatchesPerSweep} batches × {effectiveInterval} min){elapsedNote}");
+		}
 		lines.Add($"  Pool sweeps completed (all-time): {sweepCount}");
 
 		// Combined status line — surface the actual current cause of any
