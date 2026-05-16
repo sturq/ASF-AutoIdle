@@ -36,7 +36,7 @@ public sealed class AutoIdlePlugin : IPlugin, IBotModules, IBotConnection, IBot,
 
 	public Task OnLoaded() {
 		ArchiSteamFarm.Core.ASF.ArchiLogger.LogGenericInfo(
-			$"{Name} v{Version} loaded — every bot's library will be idled in rotating batches of 32. See !idlehelp for commands."
+			$"{Name} v{Version} loaded - every bot's library will be idled in rotating batches of 32. See !idlehelp for commands."
 		);
 		return Task.CompletedTask;
 	}
@@ -139,16 +139,16 @@ public sealed class AutoIdlePlugin : IPlugin, IBotModules, IBotConnection, IBot,
 
 	private static string HelpText() => string.Join('\n', new[] {
 		"AutoIdle commands:",
-		"  idleshow [bot]                     — show current rotation + whitelist + blacklist",
-		"  idleadd [bot] <appid|name>         — add a game to the always-include whitelist",
-		"  idleremove [bot] <appid|name>      — remove a game from the whitelist",
-		"  idleblacklist [bot] <appid|name>   — add a game to the never-play blacklist",
-		"  idleblacklistremove [bot] <appid|name> — remove a game from the blacklist",
-		"  idlerotation [bot] <minutes>       — change rotation interval (0 to clear override; min 5)",
-		"  idlestats [bot] [N|all]            — show top N tracked games (all-time + this session)",
-		"  idletoggle [bot]                   — toggle OnlyProfileGames (profile games vs all owned)",
-		"  idlecards [bot]                    — toggle AllowCardFarming (yield play slot to ASF card farmer)",
-		"  idlehelp                           — this message",
+		"  idleshow [bot]                     - show current rotation + whitelist + blacklist",
+		"  idleadd [bot] <appid|name>         - add a game to the always-include whitelist",
+		"  idleremove [bot] <appid|name>      - remove a game from the whitelist",
+		"  idleblacklist [bot] <appid|name>   - add a game to the never-play blacklist",
+		"  idleblacklistremove [bot] <appid|name> - remove a game from the blacklist",
+		"  idlerotation [bot] <minutes>       - change rotation interval (0 to clear override; min 5)",
+		"  idlestats [bot] [N|all]            - show top N tracked games (all-time + this session)",
+		"  idletoggle [bot]                   - toggle OnlyProfileGames (profile games vs all owned)",
+		"  idlecards [bot]                    - toggle AllowCardFarming (yield play slot to ASF card farmer)",
+		"  idlehelp                           - this message",
 	});
 }
 
@@ -210,7 +210,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 
 	// Transient flag set by sibling plugins (e.g. ASF-AutoAchievement) to
 	// pause the rotation while they need exclusive control of the bot's
-	// "playing" slot. Not persisted — a crash / restart clears it so we
+	// "playing" slot. Not persisted - a crash / restart clears it so we
 	// always come back online cleanly.
 	private bool _externalPaused;
 	private string? _externalPausedBy;          // attribution: name of the plugin that paused us
@@ -274,7 +274,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	}
 
 	internal void Start() {
-		// Everything that touches _loop / _cts must stay inside the lock —
+		// Everything that touches _loop / _cts must stay inside the lock -
 		// otherwise concurrent Start() calls (UpdateConfig restart task +
 		// OnBotLoggedOn happening near-simultaneously after a config reload)
 		// can both pass the "is loop running?" check before either assigns
@@ -371,13 +371,13 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			// Pool discovery often returns empty right after a reconnect (Steam
 			// briefly refuses), so retry with backoff instead of giving up.
 			// Previously this would log "no eligible games found, idling will
-			// not start" and exit the loop permanently — a Steam blip after a
+			// not start" and exit the loop permanently - a Steam blip after a
 			// config reload or LoggedInElsewhere could leave the bot idle
 			// indefinitely.
 			// Reuse a cached pool from a prior rotation when it's still fresh.
 			// RestartImmediately (triggered by !iadd / !iblock / !idlerotation /
 			// !idletoggle) used to force a Steam profile-games re-fetch on
-			// every command — wasting ~5–10s of API latency for changes that
+			// every command - wasting ~5–10s of API latency for changes that
 			// don't affect pool membership at all. Now we only re-discover
 			// when the cache is empty (first run / prior failure) or older
 			// than the 12h refresh window.
@@ -449,14 +449,14 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					// genuinely still needs the slot.
 					if (pausedSince.HasValue && DateTime.UtcNow - pausedSince.Value > TimeSpan.FromHours(2)) {
 						_bot.ArchiLogger.LogGenericWarning(
-							$"AutoIdle: external pause from {pausedBy ?? "?"} exceeded 2h with no resume signal — auto-clearing and resuming rotation."
+							$"AutoIdle: external pause from {pausedBy ?? "?"} exceeded 2h with no resume signal - auto-clearing and resuming rotation."
 						);
 						HandleExternalResume();
 						continue;
 					}
 
 					// Another plugin (e.g. AutoAchievement) is using the bot's
-					// "playing" slot. Don't fight for it — sleep briefly and
+					// "playing" slot. Don't fight for it - sleep briefly and
 					// re-check. The pausing plugin calls !idleresume when done,
 					// which triggers RestartImmediately and exits this branch
 					// near-instantly.
@@ -469,7 +469,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 				}
 
 				// User has manually launched a game on this account. Hold the
-				// rotation until they close it — Steam's per-account "now
+				// rotation until they close it - Steam's per-account "now
 				// playing" slot is exclusive, and our Play() calls would just
 				// silently fail (or worse, kick them out of their game).
 				if (!_bot.IsPlayingPossible) {
@@ -483,7 +483,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 				// Refresh the pool from Steam on every rotation tick, except
 				// when the cache was just populated (e.g. by a command-
 				// triggered restart from iadd / iblock that ran a moment
-				// ago — no point in a duplicate API call). The 30s threshold
+				// ago - no point in a duplicate API call). The 30s threshold
 				// keeps back-to-back commands fast while still picking up
 				// newly-acquired games within a single rotation interval.
 				DateTime? lastRefresh;
@@ -537,7 +537,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					sleepUntil = savedSleepUntil.Value.Add(pauseDuration);
 
 					// Pull the previously-stored split (whitelist vs dynamic)
-					// for accurate logging — _currentWhitelistBatch and
+					// for accurate logging - _currentWhitelistBatch and
 					// _currentDynamicBatch were preserved through the pause.
 					lock (_gate) {
 						whitelistBatch = [.. _currentWhitelistBatch];
@@ -545,7 +545,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					}
 
 					if (IsCardFarmingActive(cfg)) {
-						_bot.ArchiLogger.LogGenericInfo("AutoIdle: pause cleared but ASF card farmer is now active — yielding play slot, will resume idling when farming completes.");
+						_bot.ArchiLogger.LogGenericInfo("AutoIdle: pause cleared but ASF card farmer is now active - yielding play slot, will resume idling when farming completes.");
 					} else {
 						try {
 							(bool reok, string remsg) = await _bot.Actions.Play(batch).ConfigureAwait(false);
@@ -563,7 +563,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 								_bot.ArchiLogger.LogGenericInfo($"AutoIdle: resumed previous batch (timer paused {FormatDuration(pauseDuration)}).");
 								SavePersistentStateLocked();
 							} else {
-								_bot.ArchiLogger.LogGenericWarning($"AutoIdle: re-Play on resume failed — {remsg}");
+								_bot.ArchiLogger.LogGenericWarning($"AutoIdle: re-Play on resume failed - {remsg}");
 							}
 						} catch (Exception ex) {
 							_bot.ArchiLogger.LogGenericException(ex);
@@ -577,7 +577,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 						_currentWhitelistBatch = whitelistBatch;
 						_currentDynamicBatch = dynamicBatch;
 						// Any non-resume-path restart invalidates a stale
-						// pause snapshot — e.g. iadd while paused, or a
+						// pause snapshot - e.g. iadd while paused, or a
 						// reconnect that wiped state. Drop it so we don't
 						// accidentally resume into a now-incorrect batch
 						// later.
@@ -587,7 +587,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					}
 
 					if (IsCardFarmingActive(cfg)) {
-						_bot.ArchiLogger.LogGenericInfo("AutoIdle: yielding play slot — ASF card farmer is active. Will resume idling once farming completes.");
+						_bot.ArchiLogger.LogGenericInfo("AutoIdle: yielding play slot - ASF card farmer is active. Will resume idling once farming completes.");
 					} else {
 						try {
 							(bool ok, string msg) = await _bot.Actions.Play(batch).ConfigureAwait(false);
@@ -623,11 +623,11 @@ internal sealed class BotRuntime : IAsyncDisposable {
 								}
 								LogBatch(whitelistBatch, dynamicBatch, pool, cfg);
 								if (cycleCompleted) {
-									_bot.ArchiLogger.LogGenericInfo($"AutoIdle: pool sweep #{completedCount} complete — every game in the {eligibleCount}-game pool has been played at least once. Starting next sweep.");
+									_bot.ArchiLogger.LogGenericInfo($"AutoIdle: pool sweep #{completedCount} complete - every game in the {eligibleCount}-game pool has been played at least once. Starting next sweep.");
 								}
 								SavePersistentStateLocked();
 							} else {
-								_bot.ArchiLogger.LogGenericWarning($"AutoIdle: Bot.Actions.Play failed — {msg}");
+								_bot.ArchiLogger.LogGenericWarning($"AutoIdle: Bot.Actions.Play failed - {msg}");
 							}
 						} catch (Exception ex) {
 							_bot.ArchiLogger.LogGenericException(ex);
@@ -640,7 +640,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 				// Sleep until the next rotation in 30s chunks. Every chunk
 				// wakeup we both react to state transitions (user opened or
 				// closed a Steam game on this account) AND silently re-assert
-				// Play(batch) — a heartbeat. Steam quietly drops or overrides
+				// Play(batch) - a heartbeat. Steam quietly drops or overrides
 				// the play state in several scenarios (right after the
 				// disconnect/reconnect during a sibling-plugin pause/resume
 				// handoff, ASF's card-farmer check on connect, FreePackages
@@ -648,7 +648,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 				// the bot can sit "showing as idling" but actually playing
 				// nothing for minutes. Doing it every 30s keeps recovery
 				// fast and matches the frequency ASF's own card farmer uses
-				// to keep its play state alive — Steam handles it fine.
+				// to keep its play state alive - Steam handles it fine.
 				bool prevPossible = _bot.IsPlayingPossible;
 				bool prevFarming = IsCardFarmingActive(cfg);
 				bool aborted = false;
@@ -664,7 +664,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					// If a sibling plugin (ASF-AutoAchievement) paused us,
 					// snapshot the current batch + remaining sleep so the
 					// next RotateAsync iteration (after pause clears) can
-					// resume exactly where we left off — the rotation timer
+					// resume exactly where we left off - the rotation timer
 					// effectively pauses for the duration of the sibling's
 					// hold on the play slot.
 					bool ext;
@@ -683,22 +683,22 @@ internal sealed class BotRuntime : IAsyncDisposable {
 
 					// Card-farming start/stop transitions. Logged at every
 					// edge so the user can see in the log when the slot was
-					// yielded and when it was reclaimed — symmetric with
+					// yielded and when it was reclaimed - symmetric with
 					// the "user opened/closed a game" lines below.
 					if (!prevFarming && farming) {
-						_bot.ArchiLogger.LogGenericInfo("AutoIdle: ASF card farmer started — yielding play slot until it finishes.");
+						_bot.ArchiLogger.LogGenericInfo("AutoIdle: ASF card farmer started - yielding play slot until it finishes.");
 					} else if (prevFarming && !farming && nowPossible) {
 						_bot.ArchiLogger.LogGenericInfo("AutoIdle: ASF card farmer finished, resuming idle batch.");
 					}
 
 					if (prevPossible && !nowPossible) {
-						_bot.ArchiLogger.LogGenericInfo("AutoIdle: stopped idle — user is playing a game on this account.");
+						_bot.ArchiLogger.LogGenericInfo("AutoIdle: stopped idle - user is playing a game on this account.");
 					} else if (!prevPossible && nowPossible && !farming) {
 						_bot.ArchiLogger.LogGenericInfo("AutoIdle: user closed their game, re-asserting current batch.");
 						try {
 							(bool reok, string remsg) = await _bot.Actions.Play(batch).ConfigureAwait(false);
 							if (!reok) {
-								_bot.ArchiLogger.LogGenericWarning($"AutoIdle: re-Play after user closed game failed — {remsg}");
+								_bot.ArchiLogger.LogGenericWarning($"AutoIdle: re-Play after user closed game failed - {remsg}");
 							}
 						} catch (Exception ex) {
 							_bot.ArchiLogger.LogGenericException(ex);
@@ -711,7 +711,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 						try {
 							(bool hbok, string hbmsg) = await _bot.Actions.Play(batch).ConfigureAwait(false);
 							if (!hbok) {
-								_bot.ArchiLogger.LogGenericWarning($"AutoIdle: heartbeat re-Play failed — {hbmsg}");
+								_bot.ArchiLogger.LogGenericWarning($"AutoIdle: heartbeat re-Play failed - {hbmsg}");
 							}
 						} catch (Exception ex) {
 							_bot.ArchiLogger.LogGenericException(ex);
@@ -793,7 +793,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		if (eligibleCount == 0) {
 			sweepLine = "no eligible games";
 		} else if (remaining == 0) {
-			sweepLine = $"{played}/{eligibleCount} played, sweep complete — next batch starts a fresh sweep";
+			sweepLine = $"{played}/{eligibleCount} played, sweep complete - next batch starts a fresh sweep";
 		} else if (dynCap == 0) {
 			sweepLine = $"{played}/{eligibleCount} played, {remaining} until pool repeats (no dynamic capacity left, sweep stalled)";
 		} else {
@@ -865,7 +865,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 
 		// Round-robin: dequeue from the head of _rotationQueue, re-enqueue
 		// at the tail. Every game in the pool gets played once before any
-		// repeats (within the limit imposed by batch size — if pool size N
+		// repeats (within the limit imposed by batch size - if pool size N
 		// is less than 2*batch_size, some games inevitably get re-played
 		// the next batch because there aren't enough fresh ones to fill 32
 		// slots). New games (in candidates but not in queue) get inserted
@@ -877,7 +877,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			_rotationQueue.RemoveAll(id => !dynamicCandidates.Contains(id));
 
 			// Insert any candidates that aren't already in the queue at
-			// the head, in randomized order — gives newly-discovered
+			// the head, in randomized order - gives newly-discovered
 			// games priority and avoids a deterministic AppID-order bias
 			// when many new games appear at once.
 			HashSet<uint> queued = [.. _rotationQueue];
@@ -913,7 +913,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 
 	// Returns true iff (a) we're in coexist mode (AllowCardFarming=true),
 	// AND (b) ASF's card farmer is actively farming a game right now.
-	// In that state the rotation loop should NOT call Play(batch) — doing
+	// In that state the rotation loop should NOT call Play(batch) - doing
 	// so would knock the card-farming game out of the play slot and the
 	// farmer would just re-Play immediately, producing a 30s ping-pong.
 	private bool IsCardFarmingActive(PluginConfig cfg) {
@@ -1073,7 +1073,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		// played since the current sweep began, and an ETA for completing
 		// it. Dynamic capacity per batch is computed from the EFFECTIVE
 		// whitelist (the whitelist that *will* be in every future batch),
-		// not _currentWhitelistBatch — that way the ETA is accurate at
+		// not _currentWhitelistBatch - that way the ETA is accurate at
 		// iter 0 (before any batch has been picked) too.
 		HashSet<uint> sweepEligible = [.. pool];
 		sweepEligible.ExceptWith(effectiveBlacklist);
@@ -1091,21 +1091,21 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		int futureWhitelistInBatch = Math.Min(effectiveWhitelist.Count, cfg.MaxGamesAtOnce);
 		int dynamicCapacity = Math.Max(0, cfg.MaxGamesAtOnce - futureWhitelistInBatch);
 		// Show batch composition explicitly so the ETA math is auditable.
-		lines.Add($"  Batch capacity: {cfg.MaxGamesAtOnce} max — {futureWhitelistInBatch} whitelist always + up to {dynamicCapacity} dynamic per batch");
+		lines.Add($"  Batch capacity: {cfg.MaxGamesAtOnce} max - {futureWhitelistInBatch} whitelist always + up to {dynamicCapacity} dynamic per batch");
 		string sweepLine;
 		if (sweepEligibleCount == 0) {
 			sweepLine = "  Pool sweep: (no eligible games)";
 		} else if (sweepRemaining == 0) {
-			sweepLine = $"  Pool sweep: complete ({sweepPlayed}/{sweepEligibleCount}) — next batch starts a fresh sweep";
+			sweepLine = $"  Pool sweep: complete ({sweepPlayed}/{sweepEligibleCount}) - next batch starts a fresh sweep";
 		} else if (dynamicCapacity == 0) {
-			sweepLine = $"  Pool sweep: {sweepPlayed}/{sweepEligibleCount} played ({sweepRemaining} remaining, no dynamic capacity after whitelist — sweep will not advance)";
+			sweepLine = $"  Pool sweep: {sweepPlayed}/{sweepEligibleCount} played ({sweepRemaining} remaining, no dynamic capacity after whitelist - sweep will not advance)";
 		} else {
 			int batchesRemaining = (int) Math.Ceiling((double) sweepRemaining / dynamicCapacity);
 			TimeSpan etaSpan = TimeSpan.FromMinutes((long) batchesRemaining * effectiveInterval);
 			sweepLine = $"  Pool sweep: {sweepPlayed}/{sweepEligibleCount} played ({sweepRemaining} remaining, every game played at least once in ~{FormatDuration(etaSpan)} = {batchesRemaining} more batches)";
 		}
 		lines.Add(sweepLine);
-		// Total sweep duration at the current pace — how long one full
+		// Total sweep duration at the current pace - how long one full
 		// sweep takes end-to-end, plus how much of THIS sweep has already
 		// elapsed. Lets the user see "I'm 4h into a 25h sweep" at a glance.
 		if (sweepEligibleCount > 0 && dynamicCapacity > 0) {
@@ -1118,7 +1118,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		}
 		lines.Add($"  Pool sweeps completed (all-time): {sweepCount}");
 
-		// Combined status line — surface the actual current cause of any
+		// Combined status line - surface the actual current cause of any
 		// pause, not just whichever signal arrived first. The hierarchy:
 		//   ASF card farmer holds the play slot
 		//      → AutoAchievement (if installed) waits for the farmer
@@ -1133,7 +1133,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		if (paused && pauseStartedAt.HasValue) {
 			TimeSpan since = DateTime.UtcNow - pauseStartedAt.Value;
 			if (nowFarming) {
-				lines.Add($"  Status: idle suspended — ASF card farmer holds the play slot; {pausedBy ?? "an external plugin"} also paused for {FormatDuration(since)} waiting for it. AutoIdle resumes once both clear.");
+				lines.Add($"  Status: idle suspended - ASF card farmer holds the play slot; {pausedBy ?? "an external plugin"} also paused for {FormatDuration(since)} waiting for it. AutoIdle resumes once both clear.");
 			} else {
 				lines.Add($"  Status: PAUSED by {pausedBy ?? "an external plugin"} for {FormatDuration(since)} (rotation will skip until resume)");
 			}
@@ -1150,7 +1150,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			lines.Add($"    {FormatList(effectiveBlacklist)}");
 		}
 		if (paused) {
-			lines.Add($"  Currently idling: 0 game(s) — paused by {pausedBy ?? "an external plugin"}");
+			lines.Add($"  Currently idling: 0 game(s) - paused by {pausedBy ?? "an external plugin"}");
 		} else {
 			lines.Add($"  Currently idling: {whitelistBatch.Count + dynamicBatch.Count} game(s)");
 			if (whitelistBatch.Count > 0) {
@@ -1160,7 +1160,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 				lines.Add($"    Dynamic ({dynamicBatch.Count}): {FormatList(dynamicBatch)}");
 			}
 			if (whitelistBatch.Count == 0 && dynamicBatch.Count == 0) {
-				lines.Add("    (nothing yet — rotation hasn't picked the first batch)");
+				lines.Add("    (nothing yet - rotation hasn't picked the first batch)");
 			}
 		}
 
@@ -1232,7 +1232,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	}
 
 	internal string HandleStats(string[] args) {
-		// idlestats [N|all] — every game by all-time desc by default.
+		// idlestats [N|all] - every game by all-time desc by default.
 		int top = int.MaxValue;
 		if (args.Length > 0) {
 			string raw = args[0].Trim();
@@ -1241,7 +1241,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			} else if (int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int n) && n > 0) {
 				top = n;
 			} else {
-				return "Usage: !idlestats [N|all]   — every tracked game (default), or top N.";
+				return "Usage: !idlestats [N|all]   - every tracked game (default), or top N.";
 			}
 		}
 
@@ -1312,7 +1312,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		for (int i = 0; i < shown; i++) {
 			KeyValuePair<uint, long> kvp = ordered[i];
 			sessionTime.TryGetValue(kvp.Key, out long sessionForGame);
-			// Pad manually — interpolated alignment ({x,3}) compiles to a
+			// Pad manually - interpolated alignment ({x,3}) compiles to a
 			// trimmed-away AppendFormatted overload in ASF's runtime.
 			string idx = (i + 1).ToString(CultureInfo.InvariantCulture).PadLeft(3);
 			lines.Add($"  {idx}. {FormatID(kvp.Key)}");
@@ -1396,8 +1396,8 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	// External-pause / external-resume: invoked by sibling plugins (e.g.
 	// ASF-AutoAchievement) so they can take exclusive control of the bot's
 	// "playing" slot for the duration of a scan. Both are idempotent. The
-	// pause flag itself is transient — it clears on restart so we never
-	// come back stuck off — but the cumulative pause duration per source is
+	// pause flag itself is transient - it clears on restart so we never
+	// come back stuck off - but the cumulative pause duration per source is
 	// persisted in BotDatabase for stats reporting.
 	//
 	// Optional first arg is a plugin tag (e.g. "ASF-AutoAchievement") used
@@ -1418,7 +1418,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		}
 
 		if (!wasPaused) {
-			// Close out the in-flight batch's tracked time before we yield —
+			// Close out the in-flight batch's tracked time before we yield -
 			// otherwise the duration the bot spent paused would get credited
 			// to whatever games were playing at pause-start.
 			RecordPreviousBatchTime();
@@ -1429,17 +1429,17 @@ internal sealed class BotRuntime : IAsyncDisposable {
 
 			// Surface the actual bottleneck. If ASF is currently card farming,
 			// the requesting plugin (e.g. AutoAchievement) is itself yielding
-			// to the farmer — so the user sees both pieces of info instead of
+			// to the farmer - so the user sees both pieces of info instead of
 			// a misleading "paused by AA" when the real cause is card farming.
 			bool farming = false;
 			try { farming = _bot.CardsFarmer.NowFarming; } catch { }
-			string note = farming ? " (ASF card farmer is also active right now — actual play slot is held by the farmer; sibling plugin is waiting for it too)" : "";
+			string note = farming ? " (ASF card farmer is also active right now - actual play slot is held by the farmer; sibling plugin is waiting for it too)" : "";
 			_bot.ArchiLogger.LogGenericInfo($"AutoIdle: paused by {source}{note}. Rotation will skip until !idleresume.");
 		}
 		return "AutoIdle: paused.";
 	}
 
-	// Holds the rotation while ASF reports the bot can't play games — i.e.
+	// Holds the rotation while ASF reports the bot can't play games - i.e.
 	// the Steam account is currently in a game launched outside ASF (the
 	// user opened a title in their Steam client). Logs the stop and the
 	// resume so the user can see in the log what happened.
@@ -1452,7 +1452,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 
 			if (blockedSince is null) {
 				blockedSince = DateTime.UtcNow;
-				_bot.ArchiLogger.LogGenericInfo("AutoIdle: stopped idle — user is playing a game on this account. Rotation will resume when free.");
+				_bot.ArchiLogger.LogGenericInfo("AutoIdle: stopped idle - user is playing a game on this account. Rotation will resume when free.");
 			}
 			try {
 				await Task.Delay(TimeSpan.FromSeconds(15), token).ConfigureAwait(false);
@@ -1492,7 +1492,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		}
 
 		if (!wasPaused) {
-			return "AutoIdle: was not paused — no-op.";
+			return "AutoIdle: was not paused - no-op.";
 		}
 
 		// Signal the next RotateAsync iteration to resume the previously-
@@ -1525,7 +1525,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			return cached;
 		}
 
-		// Cache may not be populated yet — force a discovery and retry once.
+		// Cache may not be populated yet - force a discovery and retry once.
 		PluginConfig cfg;
 		lock (_gate) { cfg = _config; }
 

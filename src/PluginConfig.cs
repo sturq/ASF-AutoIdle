@@ -26,7 +26,7 @@ public sealed class PluginConfig {
 	// while it has cards to drop. AutoIdle won't Pause(true) at start and
 	// won't Play its batch while CardsFarmer.NowFarming is true. Set false
 	// to make AutoIdle take the slot unconditionally (the previous
-	// PauseCardFarming=true behaviour — permanently pauses card farming).
+	// PauseCardFarming=true behaviour - permanently pauses card farming).
 	public bool AllowCardFarming { get; set; } = true;
 	public uint InitialDelaySeconds { get; set; } = 30;
 

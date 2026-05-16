@@ -59,14 +59,14 @@ internal static class GameDiscovery {
 	}
 
 	/// <summary>
-	/// Returns the same list IPlayerService.GetOwnedGames returns — i.e. the
+	/// Returns the same list IPlayerService.GetOwnedGames returns - i.e. the
 	/// games that count toward the public "Games X" number on the profile.
 	/// Uses ASF's wrapper for SteamKit's unified messaging, so it talks to
 	/// Steam over the bot's already-authenticated protocol connection. No
 	/// Web API key required.
 	/// </summary>
 	/// <summary>
-	/// Returns the same list IPlayerService.GetOwnedGames returns — i.e. the
+	/// Returns the same list IPlayerService.GetOwnedGames returns - i.e. the
 	/// games that count toward the public "Games X" number on the profile.
 	/// Dictionary key is AppID, value is the game's display name.
 	/// </summary>

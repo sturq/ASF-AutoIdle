@@ -14,7 +14,7 @@ env:
   # ArchiSteamFarm.dll + SteamKit2.dll from this exact release.
   ASF_VERSION: '6.3.5.1'
 
-  # .NET SDK version (must match or be ahead of ASF's TFM —
+  # .NET SDK version (must match or be ahead of ASF's TFM -
   # net10.0 for ASF 6.3.x).
   DOTNET_VERSION: '10.0.x'
 
@@ -89,7 +89,7 @@ jobs:
             ## Install
 
             1. Download `ASF-AutoIdle-${{ github.ref_name }}.zip` from the assets below.
-            2. Extract it directly into `<your ASF folder>/plugins/` — the zip already contains the proper `ASF-AutoIdle/` subfolder.
+            2. Extract it directly into `<your ASF folder>/plugins/` - the zip already contains the proper `ASF-AutoIdle/` subfolder.
             3. Add to any bot config under `<ASF>/config/<BotName>.json`:
                ```json
                "AutoIdle": { "Enabled": true }
