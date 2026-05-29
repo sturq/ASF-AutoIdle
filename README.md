@@ -152,6 +152,29 @@ The compiled `ASF-AutoIdle.dll` ends up in `./publish`. Copy it into `<ASF>/plug
 - **`OnlineStatus`** - separate ASF setting. The plugin doesn't touch it. Playtime accrues regardless of online status.
 - **Free-to-play games (default mode)** - `IPlayerService.GetOwnedGames` only returns F2P titles you've launched at least once. Set `OnlyProfileGames: false` to include all F2P your account has access to (~thousands of AppIDs, will include DLC/demos).
 
+## Troubleshooting
+
+### Plugin doesn't idle everything on my account / only a subset of my library shows up
+
+If you want **every product on the account** to enter the rotation (not just the ones already on your public profile), the default discovery mode is too narrow. `OnlyProfileGames: true` uses Steam's `IPlayerService.GetOwnedGames`, which omits a bunch of stuff your account actually owns - unplayed F2P titles (Warzone, Apex Legends, PUBG, etc.), playtests, region-restricted apps, recently-claimed FreePackages additions before the profile catches up, and anything Steam decides not to expose through the profile-games endpoint. Same symptom in all those cases: library has N apps, plugin only sees a fraction.
+
+Fix - add `"OnlyProfileGames": false` to the bot's `AutoIdle` block:
+
+```json
+"AutoIdle": {
+    "Enabled": true,
+    "OnlyProfileGames": false
+}
+```
+
+Then restart the bot, or send `!idletoggle <botname>` in the ASF chat to flip it at runtime.
+
+Side effect: DLC, soundtracks and demos enter the rotation pool too. Filter them out with `"Blacklist": [appid1, appid2, ...]` if you don't want them taking batch slots.
+
+### Plugin works on one account but not another
+
+Same root cause as above - the working account's games are all visible to `GetOwnedGames` (typically because they've been launched at least once), the broken one has a chunk of its library that Steam's profile endpoint silently drops. Apply the same fix.
+
 ## License
 
 MIT - see [LICENSE](LICENSE).
