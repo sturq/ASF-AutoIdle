@@ -171,10 +171,6 @@ Then restart the bot, or send `!idletoggle <botname>` in the ASF chat to flip it
 
 Side effect: DLC, soundtracks and demos enter the rotation pool too. Filter them out with `"Blacklist": [appid1, appid2, ...]` if you don't want them taking batch slots.
 
-### Plugin works on one account but not another
-
-Same root cause as above - the working account's games are all visible to `GetOwnedGames` (typically because they've been launched at least once), the broken one has a chunk of its library that Steam's profile endpoint silently drops. Apply the same fix.
-
 ## License
 
 MIT - see [LICENSE](LICENSE).
