@@ -173,4 +173,4 @@ Side effect: DLC, soundtracks and demos enter the rotation pool too. Filter them
 
 ## License
 
-MIT - see [LICENSE](LICENSE).
+AGPL-3.0 - see [LICENSE](LICENSE). Forks and hosted modifications must keep the source open.
